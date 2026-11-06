@@ -4,12 +4,14 @@ import type { SPFI } from '@pnp/sp/index.js';
 import { CheckinType } from '@pnp/sp/files/index.js';
 
 import { getPath, pathRLC } from '../../shared/descriptions';
+import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import { copyJobProperties, methodProperty, runMoveCopyJob } from '../../shared/copyJob';
 import {
 	buildMoveCopyOptions,
 	filePathRLC,
 	getDestinationPath,
 	undefinedIfNotFound,
+	withListItemFields,
 	type MoveCopyFields,
 } from '../../shared/filesFolders';
 import { joinPath, splitPath } from '../../shared/utils';
@@ -18,6 +20,39 @@ import type { OperationContext, ResourceModule } from '../types';
 const show = (operation: string[]) => ({ show: { resource: ['file'], operation } });
 
 const CHUNK_THRESHOLD = 10 * 1024 * 1024;
+
+const FILE_SELECT = [
+	'Name',
+	'ServerRelativeUrl',
+	'UniqueId',
+	'Length',
+	'TimeCreated',
+	'TimeLastModified',
+	'Title',
+	'MajorVersion',
+	'MinorVersion',
+	'UIVersion',
+	'UIVersionLabel',
+	'Level',
+	'CheckOutType',
+	'CheckInComment',
+	'ETag',
+	'Exists',
+	'LinkingUrl',
+	'ContentTag',
+	'CustomizedPageStatus',
+	'IrmEnabled',
+];
+
+const VERSION_SELECT = [
+	'ID',
+	'VersionLabel',
+	'Created',
+	'CheckInComment',
+	'IsCurrentVersion',
+	'Size',
+	'Url',
+];
 
 const ifExistsProperty: INodeProperties = {
 	displayName: 'If Exists',
@@ -85,6 +120,12 @@ const description: INodeProperties[] = [
 		displayOptions: { show: { resource: ['file'] } },
 		options: [
 			{
+				name: 'Approve',
+				value: 'approve',
+				description: 'Approve a file that waits for content approval',
+				action: 'Approve a file',
+			},
+			{
 				name: 'Check In',
 				value: 'checkIn',
 				description: 'Check in a file',
@@ -98,6 +139,12 @@ const description: INodeProperties[] = [
 			},
 			{ name: 'Copy', value: 'copy', description: 'Copy a file', action: 'Copy a file' },
 			{ name: 'Delete', value: 'delete', description: 'Delete a file', action: 'Delete a file' },
+			{
+				name: 'Deny',
+				value: 'deny',
+				description: 'Deny a file that waits for content approval',
+				action: 'Deny a file',
+			},
 			{
 				name: 'Discard Check Out',
 				value: 'discardCheckOut',
@@ -123,12 +170,24 @@ const description: INodeProperties[] = [
 				action: 'Get the versions of a file',
 			},
 			{ name: 'Move', value: 'move', description: 'Move a file', action: 'Move a file' },
+			{
+				name: 'Publish',
+				value: 'publish',
+				description: 'Publish the latest version of a file as a major version',
+				action: 'Publish a file',
+			},
 			{ name: 'Rename', value: 'rename', description: 'Rename a file', action: 'Rename a file' },
 			{
 				name: 'Restore Version',
 				value: 'restoreVersion',
 				description: 'Restore a version of a file',
 				action: 'Restore a version of a file',
+			},
+			{
+				name: 'Unpublish',
+				value: 'unpublish',
+				description: 'Unpublish the current major version of a file',
+				action: 'Unpublish a file',
 			},
 			{
 				name: 'Upload',
@@ -211,14 +270,25 @@ const description: INodeProperties[] = [
 		default: {},
 		displayOptions: show(['get']),
 		options: [
+			...selectionOptions(FILE_SELECT),
 			{
 				displayName: 'Include List Item Fields',
 				name: 'includeListItem',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to add the list item fields of the file',
+				description:
+					'Whether to add the list item fields of the file. Same as adding ListItemAllFields to Expand. Kept for older workflows.',
 			},
 		],
+	},
+	{
+		displayName: 'Options',
+		name: 'versionOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['getVersions']),
+		options: selectionOptions(VERSION_SELECT),
 	},
 	{
 		...pathRLC({
@@ -275,6 +345,15 @@ const description: INodeProperties[] = [
 		default: '',
 		description: 'The check-in comment',
 		displayOptions: show(['checkIn']),
+	},
+	{
+		displayName: 'Comment',
+		name: 'comment',
+		type: 'string',
+		default: '',
+		description:
+			'The comment for the version history. At most 1023 characters. Publish and Unpublish need a library with minor versions or content approval. Approve and Deny need content approval.',
+		displayOptions: show(['publish', 'unpublish', 'approve', 'deny']),
 	},
 	{
 		displayName: 'Check-In Type',
@@ -360,11 +439,14 @@ async function download(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Ope
 
 async function get(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const path = getPath.call(this, siteUrl, itemIndex, 'filePath');
-	const options = this.getNodeParameter('options', itemIndex, {}) as { includeListItem?: boolean };
-	const query = getFile(sp, path);
-	return (await (options.includeListItem
-		? query.expand('ListItemAllFields')()
-		: query())) as unknown as IDataObject;
+	const options = this.getNodeParameter('options', itemIndex, {}) as SelectionValues & {
+		includeListItem?: boolean;
+	};
+	return (await applySelection(
+		getFile(sp, path),
+		FILE_SELECT,
+		withListItemFields(options),
+	)()) as unknown as IDataObject;
 }
 
 function moveCopy(kind: 'move' | 'copy') {
@@ -439,6 +521,38 @@ async function checkIn(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Oper
 	return await readFile(sp, path);
 }
 
+const COMMENT_LIMIT = 1023;
+
+/** Reads the file and, if the library has content approval, its approval status. */
+async function readPublishState(sp: SPFI, path: string): Promise<IDataObject> {
+	const info = await readFile(sp, path);
+	const status = await getFile(sp, path)
+		.listItemAllFields.select('OData__ModerationStatus', 'OData__ModerationComments')()
+		.catch(() => undefined);
+	if (!status) return info;
+	return {
+		...info,
+		moderationStatus: status.OData__ModerationStatus ?? null,
+		moderationComments: status.OData__ModerationComments ?? null,
+	};
+}
+
+function publishOperation(action: 'publish' | 'unpublish' | 'approve' | 'deny') {
+	return async function (this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
+		const path = getPath.call(this, siteUrl, itemIndex, 'filePath');
+		const comment = this.getNodeParameter('comment', itemIndex, '') as string;
+		if (comment.length > COMMENT_LIMIT) {
+			throw new NodeOperationError(
+				this.getNode(),
+				`The comment has ${comment.length} characters. SharePoint accepts at most ${COMMENT_LIMIT}.`,
+				{ itemIndex },
+			);
+		}
+		await getFile(sp, path)[action](comment);
+		return await readPublishState(sp, path);
+	};
+}
+
 async function checkOut(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const path = getPath.call(this, siteUrl, itemIndex, 'filePath');
 	await getFile(sp, path).checkout();
@@ -456,7 +570,12 @@ async function discardCheckOut(
 
 async function getVersions(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const path = getPath.call(this, siteUrl, itemIndex, 'filePath');
-	return (await getFile(sp, path).versions()) as unknown as IDataObject[];
+	const options = this.getNodeParameter('versionOptions', itemIndex, {}) as SelectionValues;
+	return (await applySelection(
+		getFile(sp, path).versions,
+		VERSION_SELECT,
+		options,
+	)()) as unknown as IDataObject[];
 }
 
 async function restoreVersion(
@@ -487,6 +606,10 @@ export const fileResource: ResourceModule = {
 		checkIn,
 		checkOut,
 		discardCheckOut,
+		publish: publishOperation('publish'),
+		unpublish: publishOperation('unpublish'),
+		approve: publishOperation('approve'),
+		deny: publishOperation('deny'),
 		getVersions,
 		restoreVersion,
 	},

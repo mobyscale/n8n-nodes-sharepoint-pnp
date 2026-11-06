@@ -23,6 +23,22 @@ export const ITEM_STATE_SECOND = 2;
 
 const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** The properties that Get Many reads for each item. The filters and the paging need all of them. */
+export const RECYCLE_BIN_SELECT = [
+	'Id',
+	'Title',
+	'ItemType',
+	'ItemState',
+	'DirName',
+	'LeafName',
+	'DeletedDate',
+	'DeletedByName',
+	'DeletedByEmail',
+	'Size',
+	'AuthorName',
+	'AuthorEmail',
+];
+
 export interface RecycleBinRawItem {
 	Id: string;
 	Title?: string;
@@ -66,8 +82,17 @@ function includesText(value: string | undefined, search: string): boolean {
 	return (value ?? '').toLowerCase().includes(search.toLowerCase());
 }
 
-export function mapItem(item: RecycleBinRawItem): IDataObject {
+/** The properties of an item that are not in the default set. SharePoint metadata is left out. */
+export function extraProperties(item: RecycleBinRawItem): IDataObject {
+	const known = new Set(RECYCLE_BIN_SELECT);
+	return Object.fromEntries(
+		Object.entries(item).filter(([key]) => !known.has(key) && !key.startsWith('odata.')),
+	);
+}
+
+export function mapItem(item: RecycleBinRawItem, includeExtra = false): IDataObject {
 	return {
+		...(includeExtra ? extraProperties(item) : {}),
 		id: item.Id,
 		title: item.Title ?? '',
 		itemType: ITEM_TYPE_NAMES[item.ItemType] ?? String(item.ItemType),

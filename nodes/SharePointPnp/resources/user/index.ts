@@ -2,6 +2,7 @@ import type { IDataObject, IExecuteFunctions, INodeProperties } from 'n8n-workfl
 import { NodeOperationError } from 'n8n-workflow';
 
 import { isSystemAccount, toLoginName } from '../../shared/securables';
+import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import type { OperationContext, ResourceModule } from '../types';
 
 const RESOURCE = 'user';
@@ -144,6 +145,24 @@ const description: INodeProperties[] = [
 			},
 		],
 	},
+	{
+		displayName: 'Options',
+		name: 'getOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['get']),
+		options: selectionOptions(USER_SELECT),
+	},
+	{
+		displayName: 'Options',
+		name: 'getAllOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['getAll']),
+		options: selectionOptions(USER_SELECT),
+	},
 ];
 
 async function ensure(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
@@ -156,10 +175,13 @@ async function ensure(this: IExecuteFunctions, { sp, itemIndex }: OperationConte
 
 async function get(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
 	const identifyBy = this.getNodeParameter('identifyBy', itemIndex) as string;
+	const options = this.getNodeParameter('getOptions', itemIndex, {}) as SelectionValues;
 	const users = sp.web.siteUsers;
+	const read = <T extends Parameters<typeof applySelection>[0]>(query: T) =>
+		applySelection(query, USER_SELECT, options);
 	if (identifyBy === 'id') {
 		const id = this.getNodeParameter('userId', itemIndex) as number;
-		return (await users.getById(id).select(...USER_SELECT)()) as unknown as IDataObject;
+		return (await read(users.getById(id))()) as unknown as IDataObject;
 	}
 	if (identifyBy === 'loginName') {
 		const loginName = String(this.getNodeParameter('loginName', itemIndex, '') ?? '').trim();
@@ -168,15 +190,15 @@ async function get(this: IExecuteFunctions, { sp, itemIndex }: OperationContext)
 				itemIndex,
 			});
 		}
-		return (await users
-			.getByLoginName(toLoginName(loginName))
-			.select(...USER_SELECT)()) as unknown as IDataObject;
+		return (await read(
+			users.getByLoginName(toLoginName(loginName)),
+		)()) as unknown as IDataObject;
 	}
 	const email = String(this.getNodeParameter('email', itemIndex, '') ?? '').trim();
 	if (!email) {
 		throw new NodeOperationError(this.getNode(), 'The email must not be empty', { itemIndex });
 	}
-	return (await users.getByEmail(email).select(...USER_SELECT)()) as unknown as IDataObject;
+	return (await read(users.getByEmail(email))()) as unknown as IDataObject;
 }
 
 async function getAll(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
@@ -186,7 +208,8 @@ async function getAll(this: IExecuteFunctions, { sp, itemIndex }: OperationConte
 		excludeSystemAccounts?: boolean;
 	};
 
-	let query = sp.web.siteUsers.select(...USER_SELECT);
+	const options = this.getNodeParameter('getAllOptions', itemIndex, {}) as SelectionValues;
+	let query = applySelection(sp.web.siteUsers, USER_SELECT, options);
 	if (filters.principalType !== undefined) {
 		query = query.filter(`PrincipalType eq ${filters.principalType}`);
 	}

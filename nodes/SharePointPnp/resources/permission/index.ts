@@ -6,6 +6,7 @@ import type { SecurableQueryable } from '@pnp/sp/security/index.js';
 import {
 	buildSecurable,
 	decodePermissions,
+	dedupeEntries,
 	diffAssignments,
 	findUserId,
 	flattenAssignments,
@@ -24,7 +25,16 @@ import {
 	type RoleAssignmentWithBindings,
 	type TargetDescriptor,
 } from '../../shared/securables';
+import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import type { OperationContext, ResourceModule } from '../types';
+import { toAssignmentOutput } from './helpers';
+import {
+	mergeByPrincipal,
+	parseRoleAssignmentsJson,
+	type ParseOptions,
+	type ResolvedAssignment,
+	type RoleAssignmentInput,
+} from './json';
 
 const RESOURCE = 'permission';
 const show = (operations: string[], extra: IDataObject = {}) => ({
@@ -41,6 +51,19 @@ const ASSIGNMENT_SELECT = [
 	'RoleDefinitionBindings/Id',
 	'RoleDefinitionBindings/Name',
 ];
+
+const ROLE_OPERATIONS = ['add', 'remove', 'set'];
+
+/** Shows a property only in Fields mode. Operations without a saved Input Mode use Fields. */
+const inFieldsMode = (property: INodeProperties): INodeProperties => ({
+	...property,
+	displayOptions: {
+		...property.displayOptions,
+		show: { ...property.displayOptions?.show, inputMode: ['fields'] },
+	},
+});
+
+const ASSIGNMENT_EXPAND = ['Member', 'RoleDefinitionBindings'];
 
 const description: INodeProperties[] = [
 	{
@@ -129,15 +152,59 @@ const description: INodeProperties[] = [
 			},
 		],
 	},
-	...principalProperties(RESOURCE, ['add', 'remove']),
-	{ ...roleRLC, displayOptions: show(['add']) },
 	{
+		displayName: 'Options',
+		name: 'getAllOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['getAll']),
+		options: selectionOptions(ASSIGNMENT_SELECT).map((option) =>
+			option.name === 'additionalProperties'
+				? {
+						...option,
+						description: `${option.description} The result keeps the default output and adds the SharePoint object in "properties".`,
+					}
+				: option,
+		),
+	},
+	{
+		displayName: 'Input Mode',
+		name: 'inputMode',
+		type: 'options',
+		default: 'fields',
+		description: 'How to give the principals and roles',
+		options: [
+			{ name: 'Fields', value: 'fields', description: 'Use the fields of this node' },
+			{
+				name: 'JSON',
+				value: 'json',
+				description: 'Give a list of principals and roles as JSON, to change many at once',
+			},
+		],
+		displayOptions: show(ROLE_OPERATIONS),
+	},
+	{
+		displayName: 'Role Assignments (JSON)',
+		name: 'roleAssignmentsJson',
+		type: 'json',
+		required: true,
+		default: '[]',
+		placeholder:
+			'[{ "principal": "Example Members", "role": "Edit" }, { "principal": "user@contoso.com", "roles": ["Read", "Contribute"] }]',
+		description:
+			'An array of objects. "principal" is a group name, a group or user ID, or the email address or login name of a user. "principalType" ("user" or "group") is optional. Use it when the name is not clear. "role" is one role name or ID, "roles" is a list of them. For Remove, an entry without a role removes all roles of the principal.',
+		displayOptions: show(ROLE_OPERATIONS, { inputMode: ['json'] }),
+	},
+	...principalProperties(RESOURCE, ['add', 'remove']).map(inFieldsMode),
+	inFieldsMode({ ...roleRLC, displayOptions: show(['add']) }),
+	inFieldsMode({
 		...roleRLC,
 		required: false,
 		description: 'The role to remove. Leave empty to remove all roles of the principal.',
 		default: { mode: 'list', value: '' },
 		displayOptions: show(['remove']),
-	},
+	}),
 	{
 		displayName: 'Options',
 		name: 'addOptions',
@@ -156,7 +223,7 @@ const description: INodeProperties[] = [
 			},
 		],
 	},
-	{
+	inFieldsMode({
 		displayName: 'Assignments',
 		name: 'assignments',
 		type: 'fixedCollection',
@@ -190,7 +257,7 @@ const description: INodeProperties[] = [
 				],
 			},
 		],
-	},
+	}),
 	{
 		displayName: 'Options',
 		name: 'setOptions',
@@ -231,10 +298,14 @@ function describeTarget(target: TargetDescriptor): IDataObject {
 
 async function getAssignments(
 	securable: SecurableQueryable,
+	options: SelectionValues = {},
 ): Promise<RoleAssignmentWithBindings[]> {
-	return (await securable.roleAssignments
-		.select(...ASSIGNMENT_SELECT)
-		.expand('Member', 'RoleDefinitionBindings')()) as unknown as RoleAssignmentWithBindings[];
+	return (await applySelection(
+		securable.roleAssignments,
+		ASSIGNMENT_SELECT,
+		options,
+		ASSIGNMENT_EXPAND,
+	)()) as unknown as RoleAssignmentWithBindings[];
 }
 
 function requireUnique(
@@ -254,31 +325,12 @@ function requireUnique(
 
 async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const securable = buildSecurable(sp, readTarget.call(this, siteUrl, itemIndex));
+	const options = this.getNodeParameter('getAllOptions', itemIndex, {}) as SelectionValues;
 	const [unique, assignments] = await Promise.all([
 		hasUniqueRoleAssignments(securable),
-		getAssignments(securable),
+		getAssignments(securable, options),
 	]);
-	return assignments.map((assignment) => {
-		const { Member, RoleDefinitionBindings, PrincipalId } =
-			assignment as RoleAssignmentWithBindings & {
-				Member?: IDataObject;
-			};
-		return {
-			hasUniqueRoleAssignments: unique,
-			principalId: PrincipalId,
-			member: {
-				id: Member?.Id,
-				title: Member?.Title,
-				loginName: Member?.LoginName,
-				principalType: Member?.PrincipalType,
-				email: Member?.Email,
-			},
-			roleDefinitions: (RoleDefinitionBindings ?? []).map((role) => ({
-				id: role.Id,
-				name: (role as { Name?: string }).Name,
-			})),
-		} as IDataObject;
-	});
+	return assignments.map((assignment) => toAssignmentOutput(assignment, unique, options));
 }
 
 async function breakInheritance(
@@ -311,7 +363,155 @@ async function resetInheritance(
 	return { ...describeTarget(target), hasUniqueRoleAssignments: false };
 }
 
-async function add(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
+const FIELD_MODE = 'fields';
+
+function readInputMode(this: IExecuteFunctions, itemIndex: number): string {
+	return this.getNodeParameter('inputMode', itemIndex, FIELD_MODE) as string;
+}
+
+function readJsonEntries(
+	this: IExecuteFunctions,
+	itemIndex: number,
+	options: ParseOptions,
+): RoleAssignmentInput[] {
+	try {
+		return parseRoleAssignmentsJson(
+			this.getNodeParameter('roleAssignmentsJson', itemIndex, '[]'),
+			options,
+		);
+	} catch (error) {
+		throw new NodeOperationError(this.getNode(), (error as Error).message, { itemIndex });
+	}
+}
+
+function wrapEntryError(
+	context: IExecuteFunctions,
+	error: unknown,
+	position: number,
+	subject: string,
+	itemIndex: number,
+): Error {
+	if (error instanceof NodeOperationError) return error;
+	const reason = error instanceof Error ? error.message : String(error);
+	return new NodeOperationError(
+		context.getNode(),
+		`Role Assignments (JSON): entry ${position + 1} "${subject}" was not found or cannot be used (${reason})`,
+		{ itemIndex },
+	);
+}
+
+/** Resolves names and emails to IDs. Nothing is changed in SharePoint before every entry resolves. */
+async function resolveEntries(
+	context: IExecuteFunctions,
+	sp: SPFI,
+	entries: RoleAssignmentInput[],
+	itemIndex: number,
+	ensureUsers: boolean,
+): Promise<ResolvedAssignment[]> {
+	const node = context.getNode();
+	const resolved: ResolvedAssignment[] = [];
+	for (const [position, entry] of entries.entries()) {
+		let principalId: number;
+		try {
+			principalId = await resolvePrincipalReference(
+				node,
+				sp,
+				parsePrincipalOrThrow(node, entry.principal, itemIndex, entry.principalType),
+				itemIndex,
+				ensureUsers,
+			);
+		} catch (error) {
+			throw wrapEntryError(context, error, position, entry.principal, itemIndex);
+		}
+		const roleDefinitionIds: number[] = [];
+		for (const role of entry.roles) {
+			try {
+				roleDefinitionIds.push(await resolveRoleId(node, sp, role, itemIndex));
+			} catch (error) {
+				throw wrapEntryError(context, error, position, `${entry.principal}, role ${role}`, itemIndex);
+			}
+		}
+		resolved.push({ principalId, roleDefinitionIds });
+	}
+	return resolved;
+}
+
+async function addFromJson(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
+	const target = readTarget.call(this, siteUrl, itemIndex);
+	const securable = buildSecurable(sp, target);
+	const options = this.getNodeParameter('addOptions', itemIndex, {}) as {
+		breakInheritanceFirst?: boolean;
+	};
+	const entries = readJsonEntries.call(this, itemIndex, { rolesOptional: false, allowEmpty: false });
+	const resolved = await resolveEntries(this, sp, entries, itemIndex, true);
+	const desired = dedupeEntries(
+		resolved.flatMap((entry) =>
+			entry.roleDefinitionIds.map((roleDefinitionId) => ({
+				principalId: entry.principalId,
+				roleDefinitionId,
+			})),
+		),
+	);
+
+	let unique = await hasUniqueRoleAssignments(securable);
+	let inheritanceBroken = false;
+	if (!unique && (options.breakInheritanceFirst ?? true)) {
+		await securable.breakRoleInheritance(true, false);
+		unique = true;
+		inheritanceBroken = true;
+	}
+	requireUnique(this, unique, itemIndex, 'add a role assignment');
+
+	for (const entry of desired) {
+		await securable.roleAssignments.add(entry.principalId, entry.roleDefinitionId);
+	}
+	return {
+		...describeTarget(target),
+		inheritanceBroken,
+		added: desired.length,
+		assignments: desired as unknown as IDataObject[],
+	};
+}
+
+async function removeFromJson(
+	this: IExecuteFunctions,
+	{ sp, siteUrl, itemIndex }: OperationContext,
+) {
+	const target = readTarget.call(this, siteUrl, itemIndex);
+	const securable = buildSecurable(sp, target);
+	const entries = readJsonEntries.call(this, itemIndex, { rolesOptional: true, allowEmpty: false });
+	const resolved = mergeByPrincipal(await resolveEntries(this, sp, entries, itemIndex, false));
+	requireUnique(
+		this,
+		await hasUniqueRoleAssignments(securable),
+		itemIndex,
+		'remove a role assignment',
+	);
+
+	for (const entry of resolved) {
+		if (entry.roleDefinitionIds.length === 0) {
+			await securable.roleAssignments.getById(entry.principalId).delete();
+		} else {
+			for (const roleDefinitionId of entry.roleDefinitionIds) {
+				await securable.roleAssignments.remove(entry.principalId, roleDefinitionId);
+			}
+		}
+	}
+	return {
+		...describeTarget(target),
+		removed: resolved.map((entry) =>
+			entry.roleDefinitionIds.length
+				? { principalId: entry.principalId, roleDefinitionIds: entry.roleDefinitionIds }
+				: { principalId: entry.principalId, allRolesRemoved: true },
+		) as IDataObject[],
+	};
+}
+
+async function add(this: IExecuteFunctions, context: OperationContext) {
+	if (readInputMode.call(this, context.itemIndex) === 'json') {
+		return await addFromJson.call(this, context);
+	}
+	const { sp, siteUrl, itemIndex } = context;
 	const target = readTarget.call(this, siteUrl, itemIndex);
 	const securable = buildSecurable(sp, target);
 	const options = this.getNodeParameter('addOptions', itemIndex, {}) as {
@@ -333,7 +533,11 @@ async function add(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Operatio
 	return { ...describeTarget(target), principalId, roleDefinitionId, inheritanceBroken };
 }
 
-async function remove(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
+async function remove(this: IExecuteFunctions, context: OperationContext) {
+	if (readInputMode.call(this, context.itemIndex) === 'json') {
+		return await removeFromJson.call(this, context);
+	}
+	const { sp, siteUrl, itemIndex } = context;
 	const target = readTarget.call(this, siteUrl, itemIndex);
 	const securable = buildSecurable(sp, target);
 	const principalId = await getPrincipalId.call(this, sp, itemIndex, false);
@@ -360,29 +564,54 @@ async function remove(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 	};
 }
 
-async function set(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
-	const target = readTarget.call(this, siteUrl, itemIndex);
-	const securable = buildSecurable(sp, target);
+function readSetEntries(this: IExecuteFunctions, itemIndex: number): RoleAssignmentInput[] {
+	if (readInputMode.call(this, itemIndex) === 'json') {
+		return readJsonEntries.call(this, itemIndex, { rolesOptional: false, allowEmpty: true });
+	}
 	const entries =
 		(
 			this.getNodeParameter('assignments', itemIndex, {}) as {
 				entries?: Array<{ principal: string; role: string }>;
 			}
 		).entries ?? [];
+	return entries.map((entry) => ({
+		principal: entry.principal ?? '',
+		roles: [entry.role ?? ''],
+	}));
+}
+
+async function set(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
+	const target = readTarget.call(this, siteUrl, itemIndex);
+	const securable = buildSecurable(sp, target);
+	const entries = readSetEntries.call(this, itemIndex);
 	const options = this.getNodeParameter('setOptions', itemIndex, {}) as {
 		copyCurrentFirst?: boolean;
 	};
 
 	const desired: RoleAssignmentEntry[] = [];
-	for (const entry of entries) {
-		const principalId = await resolvePrincipalReference(
-			this.getNode(),
-			sp,
-			parsePrincipalOrThrow(this.getNode(), entry.principal ?? '', itemIndex),
-			itemIndex,
-		);
-		const roleDefinitionId = await resolveRoleId(this.getNode(), sp, entry.role ?? '', itemIndex);
-		desired.push({ principalId, roleDefinitionId });
+	if (readInputMode.call(this, itemIndex) === 'json') {
+		const resolved = await resolveEntries(this, sp, entries, itemIndex, true);
+		for (const entry of resolved) {
+			for (const roleDefinitionId of entry.roleDefinitionIds) {
+				desired.push({ principalId: entry.principalId, roleDefinitionId });
+			}
+		}
+	} else {
+		for (const entry of entries) {
+			const principalId = await resolvePrincipalReference(
+				this.getNode(),
+				sp,
+				parsePrincipalOrThrow(this.getNode(), entry.principal, itemIndex),
+				itemIndex,
+			);
+			const roleDefinitionId = await resolveRoleId(
+				this.getNode(),
+				sp,
+				entry.roles[0],
+				itemIndex,
+			);
+			desired.push({ principalId, roleDefinitionId });
+		}
 	}
 
 	let inheritanceBroken = false;

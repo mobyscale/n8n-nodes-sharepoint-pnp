@@ -3,6 +3,7 @@ import { NodeOperationError } from 'n8n-workflow';
 import type { IFieldDefault } from '@pnp/sp/column-defaults/index.js';
 
 import { getList, getPath, listRLC } from '../../shared/descriptions';
+import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import { getRequiredString, toServerRelativePath } from '../../shared/utils';
 import type { OperationContext, ResourceModule } from '../types';
 import {
@@ -34,6 +35,8 @@ const LIST_SELECT = [
 	'LastItemModifiedDate',
 	'RootFolder/ServerRelativeUrl',
 ];
+
+const LIST_EXPAND = ['RootFolder'];
 
 const FIELD_SELECT = [
 	'Id',
@@ -230,6 +233,15 @@ const description: INodeProperties[] = [
 		},
 	},
 	...setupDescription,
+	{
+		displayName: 'Options',
+		name: 'getOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['get']),
+		options: selectionOptions(LIST_SELECT),
+	},
 
 	{
 		displayName: 'Title',
@@ -316,6 +328,15 @@ const description: INodeProperties[] = [
 			},
 		],
 	},
+	{
+		displayName: 'Options',
+		name: 'getFieldsOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['getFields']),
+		options: selectionOptions(FIELD_SELECT),
+	},
 
 	{
 		displayName: 'Options',
@@ -339,6 +360,7 @@ const description: INodeProperties[] = [
 				default: false,
 				description: 'Whether to add the internal names of the fields of each view. This needs one more request for each view.',
 			},
+			...selectionOptions(VIEW_SELECT),
 		],
 	},
 
@@ -357,7 +379,8 @@ const description: INodeProperties[] = [
 		type: 'multiOptions',
 		typeOptions: { loadOptionsMethod: 'getListFieldOptions', loadOptionsDependsOn: ['list.value'] },
 		default: [],
-		description: 'The fields to show in the view, in the order of selection. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>. Empty keeps the default fields of SharePoint. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+		description:
+			'The fields to show in the view, in the order of selection. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>. Empty keeps the default fields of SharePoint. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 		displayOptions: show(['createView']),
 	},
 	{
@@ -526,6 +549,15 @@ const description: INodeProperties[] = [
 		displayOptions: { show: { resource: ['list'], operation: ['getAll'], returnAll: [false] } },
 	},
 	{
+		displayName: 'Options',
+		name: 'getAllOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['getAll']),
+		options: selectionOptions(LIST_SELECT),
+	},
+	{
 		displayName: 'Filters',
 		name: 'filters',
 		type: 'collection',
@@ -558,10 +590,13 @@ const description: INodeProperties[] = [
 ];
 
 async function get(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
-	return (await getList
-		.call(this, sp, itemIndex)
-		.select(...LIST_SELECT)
-		.expand('RootFolder')()) as unknown as IDataObject;
+	const options = this.getNodeParameter('getOptions', itemIndex, {}) as SelectionValues;
+	return (await applySelection(
+		getList.call(this, sp, itemIndex),
+		LIST_SELECT,
+		options,
+		LIST_EXPAND,
+	)()) as unknown as IDataObject;
 }
 
 async function getAll(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
@@ -577,7 +612,8 @@ async function getAll(this: IExecuteFunctions, { sp, itemIndex }: OperationConte
 		conditions.push(`BaseTemplate eq ${filters.baseTemplate}`);
 	}
 
-	let query = sp.web.lists.select(...LIST_SELECT).expand('RootFolder');
+	const options = this.getNodeParameter('getAllOptions', itemIndex, {}) as SelectionValues;
+	let query = applySelection(sp.web.lists, LIST_SELECT, options, LIST_EXPAND);
 	if (conditions.length) query = query.filter(conditions.join(' and '));
 	if (!returnAll) query = query.top(this.getNodeParameter('limit', itemIndex) as number);
 
@@ -621,18 +657,19 @@ async function getFields(this: IExecuteFunctions, { sp, itemIndex }: OperationCo
 	if (!filters.includeHidden) conditions.push('Hidden eq false');
 	if (!filters.includeReadOnly) conditions.push('ReadOnlyField eq false');
 
-	let query = getList.call(this, sp, itemIndex).fields.select(...FIELD_SELECT);
+	const options = this.getNodeParameter('getFieldsOptions', itemIndex, {}) as SelectionValues;
+	let query = applySelection(getList.call(this, sp, itemIndex).fields, FIELD_SELECT, options);
 	if (conditions.length) query = query.filter(conditions.join(' and '));
 	return (await query()) as unknown as IDataObject[];
 }
 
 async function getViews(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
-	const options = this.getNodeParameter('getViewsOptions', itemIndex, {}) as {
+	const options = this.getNodeParameter('getViewsOptions', itemIndex, {}) as SelectionValues & {
 		includeHidden?: boolean;
 		includeFields?: boolean;
 	};
 	const list = getList.call(this, sp, itemIndex);
-	let query = list.views.select(...VIEW_SELECT);
+	let query = applySelection(list.views, VIEW_SELECT, options);
 	if (!options.includeHidden) query = query.filter('Hidden eq false');
 	const views = (await query()) as unknown as IDataObject[];
 

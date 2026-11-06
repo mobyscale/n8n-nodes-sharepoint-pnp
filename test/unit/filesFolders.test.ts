@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { buildSelection } from '../../nodes/SharePointPnp/shared/selection';
 import {
 	buildMoveCopyOptions,
 	buildViewXml,
@@ -11,6 +12,8 @@ import {
 	hasExtension,
 	normalizeRow,
 	parseExtensions,
+	pickFields,
+	withListItemFields,
 } from '../../nodes/SharePointPnp/shared/filesFolders';
 
 const siteUrl = 'https://contoso.sharepoint.com/sites/Example';
@@ -191,5 +194,45 @@ describe('row normalization', () => {
 		expect(entry.size).toBeNull();
 		expect(entry.author).toBeNull();
 		expect(entry.fields).toBeDefined();
+	});
+});
+
+describe('include list item fields', () => {
+	it('leaves the selection as it is when the option is off', () => {
+		expect(withListItemFields({ additionalProperties: 'Title' })).toEqual({
+			additionalProperties: 'Title',
+		});
+	});
+
+	it('adds ListItemAllFields to the expand list', () => {
+		const values = withListItemFields({ includeListItem: true, expand: 'Author' });
+		expect(buildSelection(['Name'], values)).toEqual({
+			select: ['Name'],
+			expand: ['Author', 'ListItemAllFields'],
+		});
+	});
+});
+
+describe('Get Many field selection', () => {
+	it('adds extra fields to the view without duplicates', () => {
+		const xml = buildViewXml({ include: 'all' }, 500, ['ContentTypeId', 'Modified']);
+		expect(xml).toContain('<FieldRef Name="ContentTypeId"/>');
+		expect(xml.match(/Name="Modified"/g)).toHaveLength(1);
+	});
+
+	it('picks the requested fields and their raw date entries', () => {
+		const row = { Title: 'A', 'Modified.': '2026-01-01T00:00:00Z', Modified: 'text', Other: 1 };
+		expect(pickFields(row, ['Modified', 'Title'])).toEqual({
+			Title: 'A',
+			'Modified.': '2026-01-01T00:00:00Z',
+			Modified: 'text',
+		});
+	});
+
+	it('puts only the requested fields in "fields"', () => {
+		const row = { FileLeafRef: 'a.txt', FSObjType: '0', Title: 'A', Other: 1 };
+		expect(normalizeRow(row, false, ['Title']).fields).toEqual({ Title: 'A' });
+		expect(normalizeRow(row, false).fields).toBeUndefined();
+		expect(normalizeRow(row, true, ['Title']).fields).toEqual(row);
 	});
 });

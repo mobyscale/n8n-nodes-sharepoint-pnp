@@ -2,6 +2,7 @@ import type { IDataObject, INodeProperties } from 'n8n-workflow';
 import type { IMoveCopyOptions } from '@pnp/sp/index.js';
 
 import { pathRLC } from './descriptions';
+import { toList, type SelectionValues } from './selection';
 import { getSiteServerRelativeUrl, isNotFoundError, splitPath, trimTrailingSlash } from './utils';
 
 export type IfExists = 'fail' | 'replace' | 'keepBoth';
@@ -119,7 +120,8 @@ function toIsoDate(value: string): string {
 	return date.toISOString();
 }
 
-const VIEW_FIELDS = [
+/** The list item fields that every Get Many entry loads. They become name, type, size and so on. */
+export const VIEW_FIELDS = [
 	'FileLeafRef',
 	'FileRef',
 	'FSObjType',
@@ -133,7 +135,11 @@ const VIEW_FIELDS = [
 ];
 
 /** Builds the CAML for one folder level. Recursion is done by the caller, one request per folder. */
-export function buildViewXml(filters: FileFolderFilters, pageSize = 500): string {
+export function buildViewXml(
+	filters: FileFolderFilters,
+	pageSize = 500,
+	extraFields: string[] = [],
+): string {
 	const conditions: string[] = [];
 	if (filters.include === 'files') {
 		conditions.push('<Eq><FieldRef Name="FSObjType"/><Value Type="Integer">0</Value></Eq>');
@@ -158,7 +164,9 @@ export function buildViewXml(filters: FileFolderFilters, pageSize = 500): string
 	const where = conditions.length
 		? `<Query><Where>${combineConditions('And', conditions)}</Where></Query>`
 		: '';
-	const viewFields = `<ViewFields>${VIEW_FIELDS.map((name) => `<FieldRef Name="${name}"/>`).join('')}</ViewFields>`;
+	const viewFields = `<ViewFields>${toList([...VIEW_FIELDS, ...extraFields])
+		.map((name) => `<FieldRef Name="${name}"/>`)
+		.join('')}</ViewFields>`;
 	return `<View Scope="All">${viewFields}${where}<RowLimit Paged="TRUE">${pageSize}</RowLimit></View>`;
 }
 
@@ -203,7 +211,19 @@ function pickRaw(row: IDataObject, field: string): unknown {
 	return row[`${field}.`] ?? row[field];
 }
 
-export function normalizeRow(row: IDataObject, includeFields: boolean): IDataObject {
+/** Returns the entries of a row that belong to the given fields. A date field also has a raw "Field." entry. */
+export function pickFields(row: IDataObject, fields: string[]): IDataObject {
+	const wanted = new Set(fields);
+	return Object.fromEntries(
+		Object.entries(row).filter(([key]) => wanted.has(key.replace(/\.$/, ''))),
+	);
+}
+
+export function normalizeRow(
+	row: IDataObject,
+	includeFields: boolean,
+	extraFields: string[] = [],
+): IDataObject {
 	const isFolder = String(row.FSObjType) === '1';
 	const entry: IDataObject = {
 		name: String(row.FileLeafRef ?? ''),
@@ -218,6 +238,7 @@ export function normalizeRow(row: IDataObject, includeFields: boolean): IDataObj
 		editor: toPerson(row.Editor) ?? null,
 	};
 	if (includeFields) entry.fields = row;
+	else if (extraFields.length) entry.fields = pickFields(row, extraFields);
 	return entry;
 }
 
@@ -226,4 +247,19 @@ export async function undefinedIfNotFound<T>(request: Promise<T>): Promise<T | u
 	return await request.catch((error: unknown) =>
 		isNotFoundError(error) ? undefined : Promise.reject(error),
 	);
+}
+
+/**
+ * "Include List Item Fields" is the same as adding ListItemAllFields to Expand. It is kept for
+ * workflows that were made before the selection options existed.
+ */
+export function withListItemFields(
+	options: SelectionValues & { includeListItem?: boolean },
+): SelectionValues {
+	const { includeListItem, ...values } = options;
+	if (!includeListItem) return values;
+	return {
+		...values,
+		expand: [...toList(values.expand), 'ListItemAllFields'],
+	};
 }

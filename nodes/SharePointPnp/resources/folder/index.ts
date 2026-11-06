@@ -3,6 +3,7 @@ import { NodeOperationError } from 'n8n-workflow';
 import type { SPFI } from '@pnp/sp/index.js';
 
 import { getPath, pathRLC } from '../../shared/descriptions';
+import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import { copyJobProperties, methodProperty, runMoveCopyJob } from '../../shared/copyJob';
 import {
 	buildMoveCopyOptions,
@@ -10,6 +11,7 @@ import {
 	getDestinationPath,
 	getMissingSegments,
 	undefinedIfNotFound,
+	withListItemFields,
 	type MoveCopyFields,
 } from '../../shared/filesFolders';
 import { joinPath, splitPath } from '../../shared/utils';
@@ -17,12 +19,26 @@ import type { OperationContext, ResourceModule } from '../types';
 
 const show = (operation: string[]) => ({ show: { resource: ['folder'], operation } });
 
+const FOLDER_SELECT = [
+	'Name',
+	'ServerRelativeUrl',
+	'UniqueId',
+	'ItemCount',
+	'TimeCreated',
+	'TimeLastModified',
+	'Exists',
+	'IsWOPIEnabled',
+	'ProgID',
+	'WelcomePage',
+];
+
 const includeFieldsOption: INodeProperties = {
 	displayName: 'Include List Item Fields',
 	name: 'includeListItem',
 	type: 'boolean',
 	default: false,
-	description: 'Whether to add the list item fields of the folder',
+	description:
+		'Whether to add the list item fields of the folder. Same as adding ListItemAllFields to Expand. Kept for older workflows.',
 };
 
 function moveCopyOptions(kind: 'move' | 'copy'): INodeProperties {
@@ -130,7 +146,7 @@ const description: INodeProperties[] = [
 		placeholder: 'Add Option',
 		default: {},
 		displayOptions: show(['get']),
-		options: [includeFieldsOption],
+		options: [...selectionOptions(FOLDER_SELECT), includeFieldsOption],
 	},
 	{
 		...pathRLC({
@@ -191,11 +207,16 @@ async function folderExists(sp: SPFI, path: string): Promise<boolean> {
 	return folder?.Exists ?? false;
 }
 
-async function readFolder(sp: SPFI, path: string, includeListItem = false): Promise<IDataObject> {
-	const query = getFolder(sp, path);
-	return (await (includeListItem
-		? query.expand('ListItemAllFields')()
-		: query())) as unknown as IDataObject;
+async function readFolder(
+	sp: SPFI,
+	path: string,
+	options: SelectionValues & { includeListItem?: boolean } = {},
+): Promise<IDataObject> {
+	return (await applySelection(
+		getFolder(sp, path),
+		FOLDER_SELECT,
+		withListItemFields(options),
+	)()) as unknown as IDataObject;
 }
 
 async function readResult(sp: SPFI, path: string, base: IDataObject): Promise<IDataObject> {
@@ -229,8 +250,10 @@ async function create(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 
 async function get(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const path = getPath.call(this, siteUrl, itemIndex, 'folderPath');
-	const options = this.getNodeParameter('options', itemIndex, {}) as { includeListItem?: boolean };
-	return await readFolder(sp, path, options.includeListItem);
+	const options = this.getNodeParameter('options', itemIndex, {}) as SelectionValues & {
+		includeListItem?: boolean;
+	};
+	return await readFolder(sp, path, options);
 }
 
 function moveCopy(kind: 'move' | 'copy') {

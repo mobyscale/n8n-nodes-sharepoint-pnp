@@ -1,7 +1,8 @@
 import type { SPFI } from '@pnp/sp/index.js';
 import { SPQueryable, spGet } from '@pnp/sp/spqueryable.js';
 
-import type { RecycleBinRawItem } from './helpers';
+import { applySelection, type SelectionValues } from '../../shared/selection';
+import { RECYCLE_BIN_SELECT, type RecycleBinRawItem } from './helpers';
 
 export type RecycleBinScope = 'siteCollection' | 'site';
 
@@ -43,8 +44,13 @@ export async function fetchRecycleBinPage(
 	stage: number,
 	pagingInfo: string | undefined,
 	rowLimit: number,
+	selection: SelectionValues = {},
 ): Promise<RecycleBinPage> {
-	const query = SPQueryable(sp.site, buildPageUrlPart(stage, pagingInfo, rowLimit));
+	const query = applySelection(
+		SPQueryable(sp.site, buildPageUrlPart(stage, pagingInfo, rowLimit)),
+		RECYCLE_BIN_SELECT,
+		selection,
+	);
 	const response = await spGet<RecycleBinRawItem[]>(query);
 	const items = response ?? [];
 	const last = items[items.length - 1];

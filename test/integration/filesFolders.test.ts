@@ -130,6 +130,26 @@ describe.runIf(hasConfig)('files and folders', () => {
 		expect(info[0].json.Length).toBe(String(content.length));
 		expect(info[0].json.ListItemAllFields).toBeDefined();
 
+		const defaults = await file('get', { filePath: locator(at('a', 'upload.txt')), options: {} });
+		expect(defaults[0].json).toMatchObject({
+			Name: 'upload.txt',
+			UIVersionLabel: expect.any(String),
+		});
+		expect(defaults[0].json.ListItemAllFields).toBeUndefined();
+
+		const expanded = await file('get', {
+			filePath: locator(at('a', 'upload.txt')),
+			options: { additionalProperties: 'Author/Title', expand: 'ListItemAllFields' },
+		});
+		expect(expanded[0].json.Author).toBeDefined();
+		expect(expanded[0].json.ListItemAllFields).toBeDefined();
+
+		const everything = await file('get', {
+			filePath: locator(at('a', 'upload.txt')),
+			options: { returnAllProperties: true },
+		});
+		expect(everything[0].json.Name).toBe('upload.txt');
+
 		const downloaded = await file('download', {
 			filePath: locator(at('a', 'upload.txt')),
 			binaryPropertyName: 'data',
@@ -179,6 +199,11 @@ describe.runIf(hasConfig)('files and folders', () => {
 		});
 		expect(result[0].json.Name).toBe('a');
 		expect(result[0].json.ListItemAllFields).toBeDefined();
+
+		const defaults = await folder('get', { folderPath: locator(at('a')), options: {} });
+		expect(defaults[0].json).toMatchObject({ Name: 'a', ServerRelativeUrl: at('a') });
+		expect(defaults[0].json.ItemCount).toBeDefined();
+		expect(defaults[0].json.ListItemAllFields).toBeUndefined();
 	});
 
 	it('checks which paths exist', async () => {
@@ -284,6 +309,22 @@ describe.runIf(hasConfig)('files and folders', () => {
 			options: { includeListItem: true },
 		});
 		expect(withFields[0].json.fields).toBeDefined();
+
+		const plain = await fileFolder('getAll', { ...base, options: {} });
+		expect(plain[0].json.fields).toBeUndefined();
+		const selected = await fileFolder('getAll', {
+			...base,
+			options: { additionalProperties: 'ContentTypeId' },
+		});
+		expect(Object.keys(selected[0].json.fields as object)).toEqual(
+			expect.arrayContaining(['ContentTypeId']),
+		);
+		expect(Object.keys(selected[0].json.fields as object)).not.toContain('Author');
+		const everything = await fileFolder('getAll', {
+			...base,
+			options: { returnAllProperties: true },
+		});
+		expect(everything[0].json.fields).toBeDefined();
 	});
 
 	it('copies, moves and renames a file', async () => {
@@ -333,6 +374,90 @@ describe.runIf(hasConfig)('files and folders', () => {
 		expect(old.map((item) => item.json.exists)).toEqual([false, true]);
 	});
 
+	describe('publishing', () => {
+		interface LibrarySettings {
+			EnableMinorVersions: boolean;
+			EnableModeration: boolean;
+		}
+
+		async function readSettings(): Promise<LibrarySettings> {
+			const root = toServerRelativePath(config!.siteUrl, config!.libraryPath).toLowerCase();
+			const lists = (await createTestSp()
+				.web.lists.select('EnableMinorVersions', 'EnableModeration', 'RootFolder/ServerRelativeUrl')
+				.expand('RootFolder')()) as unknown as Array<
+				LibrarySettings & { RootFolder: { ServerRelativeUrl: string } }
+			>;
+			const library = lists.find(
+				(list) => list.RootFolder.ServerRelativeUrl.toLowerCase() === root,
+			);
+			return library ?? { EnableMinorVersions: false, EnableModeration: false };
+		}
+
+		async function createFile(name: string): Promise<string> {
+			await file(
+				'upload',
+				{ folderPath: locator(testFolder), fileName: name, binaryPropertyName: 'data', options: {} },
+				[toBinaryItem(Buffer.from(name), name)],
+			);
+			return at(name);
+		}
+
+		const run = (operation: string, path: string) =>
+			file(operation, { filePath: locator(path), comment: 'integration test' });
+
+		it('publishes and unpublishes a file in a library with minor versions', async (context) => {
+			const settings = await readSettings();
+			if (!settings.EnableMinorVersions) {
+				context.skip('The test library has no minor versions. Settings are never changed.');
+			}
+			const path = await createFile('publish.txt');
+			const published = await run('publish', path);
+			expect(published[0].json.Level).toBe(1);
+			const unpublished = await run('unpublish', path);
+			expect(unpublished[0].json.Level).toBe(2);
+		});
+
+		it('approves and denies a file in a library with content approval', async (context) => {
+			const settings = await readSettings();
+			if (!settings.EnableModeration) {
+				context.skip('The test library has no content approval. Settings are never changed.');
+			}
+			const path = await createFile('approve.txt');
+			if (settings.EnableMinorVersions) await run('publish', path);
+			const approved = await run('approve', path);
+			expect(approved[0].json.moderationStatus).toBe(0);
+			await file(
+				'upload',
+				{
+					folderPath: locator(testFolder),
+					fileName: 'approve.txt',
+					binaryPropertyName: 'data',
+					options: { overwrite: true },
+				},
+				[toBinaryItem(Buffer.from('second'), 'approve.txt')],
+			);
+			if (settings.EnableMinorVersions) await run('publish', path);
+			const denied = await run('deny', path);
+			expect(denied[0].json.moderationStatus).toBe(1);
+		});
+
+		it('returns the SharePoint error when the library does not support the operation', async (context) => {
+			const settings = await readSettings();
+			if (settings.EnableMinorVersions && settings.EnableModeration) {
+				context.skip('The test library supports every publishing operation.');
+			}
+			const path = await createFile('unsupported.txt');
+			if (!settings.EnableMinorVersions) {
+				await expect(run('publish', path)).rejects.toThrow(/minor version/);
+				await expect(run('unpublish', path)).rejects.toThrow(/minor version/);
+			}
+			if (!settings.EnableModeration) {
+				await expect(run('approve', path)).rejects.toThrow(/content approval/);
+				await expect(run('deny', path)).rejects.toThrow(/content approval/);
+			}
+		});
+	});
+
 	it('checks out, checks in, lists and restores versions', async () => {
 		const path = at('a', 'upload.txt');
 		const checkedOut = await file('checkOut', { filePath: locator(path) });
@@ -361,6 +486,12 @@ describe.runIf(hasConfig)('files and folders', () => {
 		);
 		const versions = await file('getVersions', { filePath: locator(path) });
 		expect(versions.length).toBeGreaterThan(0);
+		expect(versions[0].json).toMatchObject({ VersionLabel: expect.any(String) });
+		const withCreator = await file('getVersions', {
+			filePath: locator(path),
+			versionOptions: { additionalProperties: 'CreatedBy/Title' },
+		});
+		expect(withCreator[0].json.CreatedBy).toBeDefined();
 		const label = String(versions[0].json.VersionLabel);
 
 		const restored = await file('restoreVersion', {
