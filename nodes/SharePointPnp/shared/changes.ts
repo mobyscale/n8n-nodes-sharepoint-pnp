@@ -899,6 +899,124 @@ export async function runChangeQuery(
 	return { changes, nextChangeToken, hasMore };
 }
 
+/** What to do when the start token is older than the change log. */
+export type ExpiredTokenMode = 'oldest' | 'now' | 'fail';
+
+/** SharePoint Online keeps the change log for 60 days. */
+export const CHANGE_LOG_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
+
+/** Returns the time of a change token (Date.now() value), or undefined when the token has no time. */
+export function getChangeTokenTime(token: string | undefined): number | undefined {
+	const ticks = token?.split(';')[3];
+	if (!ticks || !/^\d+$/.test(ticks)) return undefined;
+	return Number((BigInt(ticks) - TICKS_AT_UNIX_EPOCH) / TICKS_PER_MILLISECOND);
+}
+
+export function isChangeTokenOutsideRetention(
+	token: string | undefined,
+	now = Date.now(),
+): boolean {
+	const time = getChangeTokenTime(token);
+	return time !== undefined && time < now - CHANGE_LOG_RETENTION_MS;
+}
+
+const EXPIRED_TOKEN_ERROR_PATTERNS = [
+	/before the start of the current change log/i,
+	/(start|change) ?token[^.]*not (be )?found/i,
+	/SPInvalidChangeToken/i,
+];
+
+/** Returns true for the SharePoint error about a start token that is not in the change log. */
+export function isExpiredChangeTokenError(error: unknown): boolean {
+	const message = String((error as { message?: unknown })?.message ?? '');
+	return EXPIRED_TOKEN_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+export class ChangeTokenExpiredError extends Error {
+	constructor() {
+		super(
+			'The change token has expired. SharePoint keeps changes for about 60 days. Set "On Expired Token" to continue from the oldest available change or from now.',
+		);
+		this.name = 'ChangeTokenExpiredError';
+	}
+}
+
+export interface ExpiredTokenRunOptions extends ChangeRunOptions {
+	onExpiredToken?: ExpiredTokenMode;
+	/** The current time (Date.now() value). Only for tests. */
+	now?: number;
+}
+
+export interface ExpiredTokenRunResult extends ChangeRunResult {
+	/** True when the start token was older than the change log. */
+	tokenExpired: boolean;
+}
+
+/**
+ * Runs a change query and handles a start token that is older than the change log.
+ *
+ * Contract: when the token has expired, the changes between the token and the start of the change
+ * log are lost. "oldest" returns all changes that are still in the log. They are all newer than the
+ * token, so there are no duplicates and the gap is as small as possible. Each of these changes has
+ * `tokenExpired: true`. "now" returns no changes and the current token. "fail" throws.
+ *
+ * SharePoint Online does not return an error for an old token. It returns the changes that are
+ * still in the log, so the age of the token is also checked. Other SharePoint versions return a
+ * "start token not found" error. Then the query runs again without a start token.
+ */
+export async function runChangeQueryWithExpiry(
+	sp: SPFI,
+	target: ChangeTarget,
+	query: ChangeQuery,
+	options: ExpiredTokenRunOptions,
+): Promise<ExpiredTokenRunResult> {
+	const mode = options.onExpiredToken ?? 'oldest';
+	const startToken = query.ChangeTokenStart?.StringValue;
+	if (!startToken)
+		return { ...(await runChangeQuery(sp, target, query, options)), tokenExpired: false };
+
+	// The current token is read before the query, so that no change is lost when nothing is read.
+	const getFallbackToken = async (): Promise<string> => {
+		if (mode === 'fail') throw new ChangeTokenExpiredError();
+		return await target.getCurrentToken();
+	};
+	const markExpired = (result: ChangeRunResult, fallbackToken: string): ExpiredTokenRunResult => {
+		for (const change of result.changes) change.tokenExpired = true;
+		return {
+			...result,
+			nextChangeToken: result.nextChangeToken ?? fallbackToken,
+			tokenExpired: true,
+		};
+	};
+	const startFromNow = (currentToken: string): ExpiredTokenRunResult => ({
+		changes: [],
+		nextChangeToken: currentToken,
+		hasMore: false,
+		tokenExpired: true,
+	});
+
+	let fallbackToken: string | undefined;
+	if (isChangeTokenOutsideRetention(startToken, options.now)) {
+		fallbackToken = await getFallbackToken();
+		if (mode === 'now') return startFromNow(fallbackToken);
+	}
+
+	const firstQuery = mode === 'oldest' ? { ...query, IgnoreStartTokenNotFoundError: true } : query;
+	const result = await runChangeQuery(sp, target, firstQuery, options).catch((error: unknown) => {
+		if (isExpiredChangeTokenError(error)) return undefined;
+		throw error;
+	});
+	if (result) {
+		return fallbackToken ? markExpired(result, fallbackToken) : { ...result, tokenExpired: false };
+	}
+
+	fallbackToken ??= await getFallbackToken();
+	if (mode === 'now') return startFromNow(fallbackToken);
+	const withoutStart: ChangeQuery = { ...query };
+	delete withoutStart.ChangeTokenStart;
+	return markExpired(await runChangeQuery(sp, target, withoutStart, options), fallbackToken);
+}
+
 type DisplayOptions = INodeProperties['displayOptions'];
 
 function withDisplay(property: INodeProperties, show: IDataObject | undefined): INodeProperties {
@@ -997,6 +1115,33 @@ const fetchLimitOption: INodeProperties = {
 	description: 'The maximum number of changes that SharePoint returns in one request',
 };
 
+export const onExpiredTokenOption: INodeProperties = {
+	displayName: 'On Expired Token',
+	name: 'onExpiredToken',
+	type: 'options',
+	options: [
+		{
+			name: 'Fail',
+			value: 'fail',
+			description: 'Stop with an error. Change this option to continue.',
+		},
+		{
+			name: 'Start From Now',
+			value: 'now',
+			description: 'Save the current token and return no changes. The changes in the gap are lost.',
+		},
+		{
+			name: 'Start From Oldest Available Change',
+			value: 'oldest',
+			description:
+				'Return all changes that are still in the change log. They are all newer than the token, so there are no duplicates.',
+		},
+	],
+	default: 'oldest',
+	description:
+		'What to do when the start token is older than the change log. SharePoint Online keeps changes for 60 days, so the changes between the token and the start of the change log are lost. Changes that are returned after an expired token have "tokenExpired": true.',
+};
+
 export const queryOptionsProperty: INodeProperties = {
 	displayName: 'Query Options',
 	name: 'queryOptions',
@@ -1046,6 +1191,10 @@ export const queryOptionsProperty: INodeProperties = {
 	],
 };
 
+function sortByDisplayName(properties: INodeProperties[]): INodeProperties[] {
+	return [...properties].sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
 const itemDetailOptions: INodeProperties[] = [
 	{
 		displayName: 'Folder Path Filter',
@@ -1089,8 +1238,12 @@ export const changeOptionsProperty: INodeProperties = {
 	type: 'collection',
 	placeholder: 'Add Option',
 	default: {},
-	options: [
+	options: sortByDisplayName([
 		...itemDetailOptions,
+		{
+			...onExpiredTokenOption,
+			displayOptions: { show: { '/startFrom': ['token', 'date'] } },
+		},
 		{
 			displayName: 'Output',
 			name: 'output',
@@ -1105,7 +1258,7 @@ export const changeOptionsProperty: INodeProperties = {
 			],
 			default: 'perChange',
 		},
-	],
+	]),
 };
 
 export const triggerOptionsProperty: INodeProperties = {
@@ -1114,9 +1267,10 @@ export const triggerOptionsProperty: INodeProperties = {
 	type: 'collection',
 	placeholder: 'Add Option',
 	default: {},
-	options: [
+	options: sortByDisplayName([
 		fetchLimitOption,
 		...itemDetailOptions.filter((option) => option.name !== 'folderPathFilter'),
+		onExpiredTokenOption,
 		{
 			displayName: 'Start From Date',
 			name: 'startFromDate',
@@ -1125,7 +1279,7 @@ export const triggerOptionsProperty: INodeProperties = {
 			description:
 				'On the first poll, emit the changes since this date. If not set, the first poll only saves the current change token.',
 		},
-	],
+	]),
 };
 
 /** Applies "show" display options to a group of shared change properties. */
