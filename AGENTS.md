@@ -111,6 +111,8 @@ regarding building community nodes:
 - `resources/list/index.ts` is the reference implementation. Copy its style.
 - All SharePoint calls use PnPjs (`@pnp/sp`) through `createSp()` in `transport/index.ts`. Requests go through
   `httpRequestWithAuthentication`, so n8n handles the token. Do not call `fetch` directly.
+- Every Get and Get Many operation uses `shared/selection.ts`: a documented default property set, plus the
+  options Additional Properties, Expand and Return All Properties (`selectionOptions`, `applySelection`).
 - Use the shared pickers and helpers in `shared/descriptions.ts` (site, list, library, path) and `shared/utils.ts`
   (path handling, `isNotFoundError`, `toNodeError`). Paths accept site-relative, server-relative or absolute URLs.
 - PnPjs is ESM-only. It is a devDependency that `scripts/bundle.mjs` bundles into the node. Never add `dependencies`.
