@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { joinPath } from '../../nodes/SharePointPnp/shared/utils';
+import { joinPath, toServerRelativePath } from '../../nodes/SharePointPnp/shared/utils';
 import {
 	config,
 	createTestFolder,
@@ -10,7 +10,6 @@ import {
 	removeTestFolder,
 	runNode,
 } from './harness';
-import { toServerRelativePath } from '../../nodes/SharePointPnp/shared/utils';
 
 interface Group {
 	id: string;
