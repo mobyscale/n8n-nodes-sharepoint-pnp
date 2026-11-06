@@ -6,8 +6,9 @@ import type {
 } from 'n8n-workflow';
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
-import * as listSearch from './methods/listSearch';
+import * as listSearchBase from './methods/listSearch';
 import * as listSearchFields from './methods/listSearchFields';
+import * as listSearchPrincipals from './methods/listSearchPrincipals';
 import { getListItemFields } from './methods/resourceMapping';
 import { resources } from './resources';
 import { getSiteUrl, siteRLC } from './shared/descriptions';
@@ -67,7 +68,7 @@ export class SharePointPnp implements INodeType {
 	};
 
 	methods = {
-		listSearch,
+		listSearch: { ...listSearchBase, ...listSearchPrincipals },
 		loadOptions: listSearchFields,
 		resourceMapping: { getListItemFields },
 	};

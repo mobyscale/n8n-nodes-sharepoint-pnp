@@ -121,6 +121,9 @@ regarding building community nodes:
 - Integration tests: `test/integration/*.test.ts` (`npm run test:integration`). Use `test/integration/harness.ts`.
   Create and change content only inside the folder from `createTestFolder()`, and remove it in `afterAll`.
 - Tests that create lists or document libraries must use `it.skip`. They are hard to delete and need manual cleanup.
+- Tests may only act on files, folders, list items and groups that the test created in its own setup, and must
+  clean them up afterward. Never read, copy, move, change or delete an existing file or folder that the test did not
+  create. The test library is only the container for the test folder.
 - Never change existing site content, site groups, or site-level permissions in tests.
 
 ### Rules for public content

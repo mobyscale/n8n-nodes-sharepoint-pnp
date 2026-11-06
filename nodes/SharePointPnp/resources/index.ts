@@ -3,6 +3,7 @@ import { fileResource } from './file';
 import { fileFolderResource } from './fileFolder';
 import { folderResource } from './folder';
 import { groupResource } from './group';
+import { userResource } from './user';
 import { listResource } from './list';
 import { listItemResource } from './listItem';
 import { permissionResource } from './permission';
@@ -18,6 +19,7 @@ export const resources: ResourceModule[] = [
 	listItemResource,
 	permissionResource,
 	groupResource,
+	userResource,
 	searchResource,
 	changeResource,
 	recycleBinResource,
