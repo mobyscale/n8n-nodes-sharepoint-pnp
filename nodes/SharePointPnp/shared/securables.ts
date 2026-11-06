@@ -45,12 +45,15 @@ export function toLoginName(identifier: string): string {
 
 /**
  * Reads a principal from free text: digits are a principal ID, text with "@" or "|" is a user,
- * and all other text is a SharePoint group name.
+ * and all other text is a SharePoint group name. A principal type decides what text is when
+ * the guess would be wrong, for example a user login name without "@" or "|".
  */
-export function parsePrincipal(input: string): PrincipalReference {
+export function parsePrincipal(input: string, type?: 'user' | 'group'): PrincipalReference {
 	const value = input.trim();
 	if (!value) throw new Error('The principal must not be empty');
 	if (/^\d+$/.test(value)) return { kind: 'id', id: Number(value) };
+	if (type === 'group') return { kind: 'group', name: value };
+	if (type === 'user') return { kind: 'user', loginName: toLoginName(value) };
 	if (value.includes('@') || value.includes('|')) {
 		return { kind: 'user', loginName: toLoginName(value) };
 	}
@@ -61,9 +64,10 @@ export function parsePrincipalOrThrow(
 	node: INode,
 	input: string,
 	itemIndex: number,
+	type?: 'user' | 'group',
 ): PrincipalReference {
 	try {
-		return parsePrincipal(input);
+		return parsePrincipal(input, type);
 	} catch (error) {
 		throw new NodeOperationError(node, (error as Error).message, { itemIndex });
 	}
