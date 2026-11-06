@@ -125,6 +125,8 @@ regarding building community nodes:
   clean them up afterward. Never read, copy, move, change or delete an existing file or folder that the test did not
   create. The test library is only the container for the test folder.
 - Never change existing site content, site groups, or site-level permissions in tests.
+- Site-level and schema changes (site settings, property bag, site creation, hub sites, fields, content types,
+  list settings, term store writes) never run in integration tests. Only read tests run. Write tests use `it.skip`.
 
 ### Rules for public content
 - This is a public npm package. Never put real tenant, site, library, folder, file, user or group names in code,
