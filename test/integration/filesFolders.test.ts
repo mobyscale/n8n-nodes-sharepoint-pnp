@@ -130,6 +130,26 @@ describe.runIf(hasConfig)('files and folders', () => {
 		expect(info[0].json.Length).toBe(String(content.length));
 		expect(info[0].json.ListItemAllFields).toBeDefined();
 
+		const defaults = await file('get', { filePath: locator(at('a', 'upload.txt')), options: {} });
+		expect(defaults[0].json).toMatchObject({
+			Name: 'upload.txt',
+			UIVersionLabel: expect.any(String),
+		});
+		expect(defaults[0].json.ListItemAllFields).toBeUndefined();
+
+		const expanded = await file('get', {
+			filePath: locator(at('a', 'upload.txt')),
+			options: { additionalProperties: 'Author/Title', expand: 'ListItemAllFields' },
+		});
+		expect(expanded[0].json.Author).toBeDefined();
+		expect(expanded[0].json.ListItemAllFields).toBeDefined();
+
+		const everything = await file('get', {
+			filePath: locator(at('a', 'upload.txt')),
+			options: { returnAllProperties: true },
+		});
+		expect(everything[0].json.Name).toBe('upload.txt');
+
 		const downloaded = await file('download', {
 			filePath: locator(at('a', 'upload.txt')),
 			binaryPropertyName: 'data',
@@ -179,6 +199,11 @@ describe.runIf(hasConfig)('files and folders', () => {
 		});
 		expect(result[0].json.Name).toBe('a');
 		expect(result[0].json.ListItemAllFields).toBeDefined();
+
+		const defaults = await folder('get', { folderPath: locator(at('a')), options: {} });
+		expect(defaults[0].json).toMatchObject({ Name: 'a', ServerRelativeUrl: at('a') });
+		expect(defaults[0].json.ItemCount).toBeDefined();
+		expect(defaults[0].json.ListItemAllFields).toBeUndefined();
 	});
 
 	it('checks which paths exist', async () => {
@@ -284,6 +309,22 @@ describe.runIf(hasConfig)('files and folders', () => {
 			options: { includeListItem: true },
 		});
 		expect(withFields[0].json.fields).toBeDefined();
+
+		const plain = await fileFolder('getAll', { ...base, options: {} });
+		expect(plain[0].json.fields).toBeUndefined();
+		const selected = await fileFolder('getAll', {
+			...base,
+			options: { additionalProperties: 'ContentTypeId' },
+		});
+		expect(Object.keys(selected[0].json.fields as object)).toEqual(
+			expect.arrayContaining(['ContentTypeId']),
+		);
+		expect(Object.keys(selected[0].json.fields as object)).not.toContain('Author');
+		const everything = await fileFolder('getAll', {
+			...base,
+			options: { returnAllProperties: true },
+		});
+		expect(everything[0].json.fields).toBeDefined();
 	});
 
 	it('copies, moves and renames a file', async () => {
@@ -361,6 +402,12 @@ describe.runIf(hasConfig)('files and folders', () => {
 		);
 		const versions = await file('getVersions', { filePath: locator(path) });
 		expect(versions.length).toBeGreaterThan(0);
+		expect(versions[0].json).toMatchObject({ VersionLabel: expect.any(String) });
+		const withCreator = await file('getVersions', {
+			filePath: locator(path),
+			versionOptions: { additionalProperties: 'CreatedBy/Title' },
+		});
+		expect(withCreator[0].json.CreatedBy).toBeDefined();
 		const label = String(versions[0].json.VersionLabel);
 
 		const restored = await file('restoreVersion', {
