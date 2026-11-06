@@ -40,7 +40,8 @@
 			"dist/credentials/SharePointPnpCertificateApi.credentials.js"
 		],
 		"nodes": [
-			"dist/nodes/SharePointPnp/SharePointPnp.node.js"
+			"dist/nodes/SharePointPnp/SharePointPnp.node.js",
+			"dist/nodes/SharePointPnpTrigger/SharePointPnpTrigger.node.js"
 		]
 	},
 	"devDependencies": {
