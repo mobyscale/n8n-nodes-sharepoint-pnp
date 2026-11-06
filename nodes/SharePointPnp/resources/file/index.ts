@@ -4,6 +4,7 @@ import type { SPFI } from '@pnp/sp/index.js';
 import { CheckinType } from '@pnp/sp/files/index.js';
 
 import { getPath, pathRLC } from '../../shared/descriptions';
+import { copyJobProperties, methodProperty, runMoveCopyJob } from '../../shared/copyJob';
 import {
 	buildMoveCopyOptions,
 	filePathRLC,
@@ -33,12 +34,12 @@ const ifExistsProperty: INodeProperties = {
 
 function moveCopyOptions(kind: 'move' | 'copy'): INodeProperties {
 	return {
-		displayName: 'Options',
+		displayName: 'Direct Options',
 		name: 'options',
 		type: 'collection',
 		placeholder: 'Add Option',
 		default: {},
-		displayOptions: show([kind]),
+		displayOptions: { show: { resource: ['file'], operation: [kind], method: ['direct'] } },
 		options: [
 			{
 				displayName: 'Bypass Shared Lock',
@@ -227,8 +228,11 @@ const description: INodeProperties[] = [
 		}),
 		displayOptions: show(['copy', 'move']),
 	},
+	methodProperty('file'),
 	moveCopyOptions('copy'),
 	moveCopyOptions('move'),
+	...copyJobProperties('file', 'copy'),
+	...copyJobProperties('file', 'move'),
 	{
 		displayName: 'New Name',
 		name: 'newName',
@@ -367,6 +371,18 @@ function moveCopy(kind: 'move' | 'copy') {
 	return async function (this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 		const sourcePath = getPath.call(this, siteUrl, itemIndex, 'filePath');
 		const destinationFolder = getPath.call(this, siteUrl, itemIndex, 'destinationFolder');
+		if (this.getNodeParameter('method', itemIndex, 'copyJob') === 'copyJob') {
+			return await runMoveCopyJob.call(
+				this,
+				{ sp, siteUrl, itemIndex },
+				{
+					resource: 'file',
+					kind,
+					sourcePath,
+					destinationFolder,
+				},
+			);
+		}
 		const fields = this.getNodeParameter('options', itemIndex, {}) as MoveCopyFields;
 		const destinationPath = getDestinationPath(sourcePath, destinationFolder, fields.newName);
 		const { overwrite, options } = buildMoveCopyOptions(kind, fields);

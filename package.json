@@ -41,7 +41,8 @@
 		],
 		"nodes": [
 			"dist/nodes/SharePointPnp/SharePointPnp.node.js",
-			"dist/nodes/SharePointPnpTrigger/SharePointPnpTrigger.node.js"
+			"dist/nodes/SharePointPnpTrigger/SharePointPnpTrigger.node.js",
+			"dist/nodes/SharePointPnpWebhookTrigger/SharePointPnpWebhookTrigger.node.js"
 		]
 	},
 	"devDependencies": {

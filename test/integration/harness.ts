@@ -26,6 +26,8 @@ export interface IntegrationConfig {
 	thumbprint: string;
 	siteUrl: string;
 	libraryPath: string;
+	/** An HTTPS URL that answers the SharePoint webhook validation request. Optional. */
+	webhookNotificationUrl: string;
 }
 
 declare module 'vitest' {

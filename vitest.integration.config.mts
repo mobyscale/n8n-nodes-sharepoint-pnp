@@ -21,6 +21,7 @@ const integration = process.env.SP_SITE_URL
 			thumbprint: process.env.SP_CERTIFICATE_THUMBPRINT ?? '',
 			siteUrl: process.env.SP_SITE_URL,
 			libraryPath: process.env.SP_TEST_LIBRARY_PATH ?? 'Shared Documents',
+			webhookNotificationUrl: process.env.SP_WEBHOOK_NOTIFICATION_URL ?? '',
 		}
 	: null;
 

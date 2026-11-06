@@ -8,16 +8,20 @@ import type {
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
 import * as listSearch from '../SharePointPnp/methods/listSearch';
+import {
+	eventsProperty,
+	folderPathFilterProperty,
+	getTriggerEvents,
+	getTriggerSettings,
+} from '../SharePointPnp/shared/changeTrigger';
 import type { ChangeScope, LocatorValue } from '../SharePointPnp/shared/changes';
 import {
 	buildChangeQuery,
-	CHANGE_EVENTS,
 	changeScopeProperty,
 	createChangeTokenFromDate,
 	getChangeTarget,
-	getEventFlags,
-	resolveFolderFilter,
 	runChangeQuery,
+	runChangeQueryWithExpiry,
 	showFor,
 	triggerOptionsProperty,
 } from '../SharePointPnp/shared/changes';
@@ -28,14 +32,6 @@ import { createSp } from '../SharePointPnp/transport';
 /** In manual mode the trigger shows the matching changes of this period. */
 export const MANUAL_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 export const MANUAL_LIMIT = 10;
-
-interface TriggerOptions {
-	fetchLimit?: number;
-	includeItemDetails?: boolean;
-	itemFields?: string;
-	resolveDeletedItems?: boolean;
-	startFromDate?: string;
-}
 
 export interface TriggerState extends IDataObject {
 	changeToken?: string;
@@ -81,28 +77,8 @@ export class SharePointPnpTrigger implements INodeType {
 			siteRLC,
 			changeScopeProperty,
 			...showFor([listRLC], { scope: ['list'] }),
-			{
-				displayName: 'Events',
-				name: 'events',
-				type: 'multiOptions',
-				required: true,
-				options: CHANGE_EVENTS.map(({ name, value, description }) => ({
-					name,
-					value,
-					description,
-				})),
-				default: ['fileCreated', 'fileUpdated'],
-				description: 'The changes that start the workflow',
-			},
-			{
-				displayName: 'Folder Path Filter',
-				name: 'folderPathFilter',
-				type: 'string',
-				default: '',
-				placeholder: 'Shared Documents/Folder',
-				description:
-					'Only trigger for files, folders and items inside this folder and its subfolders. Leave empty for all. With the List scope, SharePoint reads the change log of the folder.',
-			},
+			eventsProperty,
+			folderPathFilterProperty,
 			triggerOptionsProperty,
 		],
 	};
@@ -119,33 +95,20 @@ export class SharePointPnpTrigger implements INodeType {
 }
 
 export async function pollChanges(this: IPollFunctions): Promise<INodeExecutionData[][] | null> {
-	const events = this.getNodeParameter('events', []) as string[];
-	if (!events.length) {
-		throw new NodeOperationError(this.getNode(), 'Select at least one event');
-	}
+	getTriggerEvents(this);
 	const scope = this.getNodeParameter('scope') as ChangeScope;
 	const list = scope === 'list' ? (this.getNodeParameter('list') as LocatorValue) : undefined;
 	if (scope === 'list' && !String(list?.value ?? '').trim()) {
 		throw new NodeOperationError(this.getNode(), 'Select a list');
 	}
-	const options = this.getNodeParameter('options', {}) as TriggerOptions;
 
 	const siteUrl = await getSiteUrl(this);
 	const sp = createSp(this, siteUrl);
-	const folderPathFilter = resolveFolderFilter(
+	const { flags, folderPathFilter, options, queryOptions, runOptions } = getTriggerSettings(
+		this,
 		siteUrl,
-		this.getNodeParameter('folderPathFilter', '') as string,
 	);
 	const target = getChangeTarget(sp, scope, list, scope === 'list' ? folderPathFilter : undefined);
-	const flags = getEventFlags(events);
-	const runOptions = {
-		events,
-		folderPathFilter,
-		includeItemDetails: options.includeItemDetails,
-		itemFields: options.itemFields,
-		resolveDeletedItems: options.resolveDeletedItems ?? true,
-	};
-	const queryOptions = { fetchLimit: options.fetchLimit };
 
 	if (this.getMode() === 'manual') {
 		const since = new Date(Date.now() - MANUAL_LOOKBACK_MS);
@@ -154,7 +117,7 @@ export async function pollChanges(this: IPollFunctions): Promise<INodeExecutionD
 			sp,
 			target,
 			buildChangeQuery({ ...flags, startToken, queryOptions }),
-			{ ...runOptions, returnAll: true, deadline: getDeadline(this) },
+			{ ...runOptions, deadline: getDeadline(this) },
 		);
 		const latest = result.changes.slice(-MANUAL_LIMIT);
 		return latest.length ? [this.helpers.returnJsonArray(latest)] : null;
@@ -177,11 +140,11 @@ export async function pollChanges(this: IPollFunctions): Promise<INodeExecutionD
 		startToken = createChangeTokenFromDate(scope, await target.getId(), date);
 	}
 
-	const result = await runChangeQuery(
+	const result = await runChangeQueryWithExpiry(
 		sp,
 		target,
 		buildChangeQuery({ ...flags, startToken, queryOptions }),
-		{ ...runOptions, returnAll: true, deadline: getDeadline(this) },
+		{ ...runOptions, deadline: getDeadline(this) },
 	);
 
 	state.changeToken = result.nextChangeToken ?? startToken;
