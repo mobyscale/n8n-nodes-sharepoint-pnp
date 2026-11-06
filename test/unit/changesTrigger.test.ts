@@ -8,9 +8,16 @@ import {
 	SharePointPnpTrigger,
 } from '../../nodes/SharePointPnpTrigger/SharePointPnpTrigger.node';
 
+const original = await vi.importActual<typeof changes>('../../nodes/SharePointPnp/shared/changes');
+
 vi.mock('../../nodes/SharePointPnp/shared/changes', async (importOriginal) => {
-	const original = await importOriginal<typeof changes>();
-	return { ...original, getChangeTarget: vi.fn(), runChangeQuery: vi.fn() };
+	const actual = await importOriginal<typeof changes>();
+	return {
+		...actual,
+		getChangeTarget: vi.fn(),
+		runChangeQuery: vi.fn(),
+		runChangeQueryWithExpiry: vi.fn(),
+	};
 });
 
 const LIST_ID = '11111111-2222-3333-4444-555555555555';
@@ -32,6 +39,7 @@ const target = {
 
 const getChangeTarget = vi.mocked(changes.getChangeTarget);
 const runChangeQuery = vi.mocked(changes.runChangeQuery);
+const runWithExpiry = vi.mocked(changes.runChangeQueryWithExpiry);
 
 function createContext(
 	parameters: IDataObject,
@@ -79,13 +87,14 @@ describe('SharePointPnpTrigger.poll', () => {
 		expect(await poll(createContext({}, staticData))).toBeNull();
 		expect(staticData.changeToken).toBe('current-token');
 		expect(staticData.scopeKey).toContain(LIST_ID);
-		expect(runChangeQuery).not.toHaveBeenCalled();
+		expect(runWithExpiry).not.toHaveBeenCalled();
 	});
 
 	it('reads changes after the stored token and saves the next token', async () => {
 		const staticData: IDataObject = {};
 		await poll(createContext({}, staticData));
-		runChangeQuery.mockResolvedValueOnce({
+		runWithExpiry.mockResolvedValueOnce({
+			tokenExpired: false,
 			changes: [{ changeType: 'Add' }],
 			nextChangeToken: 'next-token',
 			hasMore: false,
@@ -95,7 +104,7 @@ describe('SharePointPnpTrigger.poll', () => {
 
 		expect(result).toEqual([[{ json: { changeType: 'Add' } }]]);
 		expect(staticData.changeToken).toBe('next-token');
-		const [, , query, options] = runChangeQuery.mock.calls[0];
+		const [, , query, options] = runWithExpiry.mock.calls[0];
 		expect(query.ChangeTokenStart).toEqual({ StringValue: 'current-token' });
 		expect(query.File).toBe(true);
 		expect(query.Add).toBe(true);
@@ -105,7 +114,8 @@ describe('SharePointPnpTrigger.poll', () => {
 	it('returns null and keeps the token when there are no changes', async () => {
 		const staticData: IDataObject = {};
 		await poll(createContext({}, staticData));
-		runChangeQuery.mockResolvedValueOnce({
+		runWithExpiry.mockResolvedValueOnce({
+			tokenExpired: false,
 			changes: [],
 			nextChangeToken: undefined,
 			hasMore: false,
@@ -118,7 +128,8 @@ describe('SharePointPnpTrigger.poll', () => {
 	it('moves the token past changes that the filters skipped', async () => {
 		const staticData: IDataObject = {};
 		await poll(createContext({}, staticData));
-		runChangeQuery.mockResolvedValueOnce({
+		runWithExpiry.mockResolvedValueOnce({
+			tokenExpired: false,
 			changes: [],
 			nextChangeToken: 'skipped',
 			hasMore: false,
@@ -130,7 +141,8 @@ describe('SharePointPnpTrigger.poll', () => {
 
 	it('starts from a date on the first poll when the option is set', async () => {
 		const staticData: IDataObject = {};
-		runChangeQuery.mockResolvedValueOnce({
+		runWithExpiry.mockResolvedValueOnce({
+			tokenExpired: false,
 			changes: [{ changeType: 'Add' }],
 			nextChangeToken: 'next-token',
 			hasMore: false,
@@ -141,7 +153,7 @@ describe('SharePointPnpTrigger.poll', () => {
 		);
 
 		expect(result).toHaveLength(1);
-		const [, , query] = runChangeQuery.mock.calls[0];
+		const [, , query] = runWithExpiry.mock.calls[0];
 		expect(query.ChangeTokenStart).toEqual({
 			StringValue: `1;3;${LIST_ID};638396640000000000;-1`,
 		});
@@ -152,7 +164,62 @@ describe('SharePointPnpTrigger.poll', () => {
 		const staticData: IDataObject = { changeToken: 'old-token', scopeKey: 'another scope' };
 		expect(await poll(createContext({}, staticData))).toBeNull();
 		expect(staticData.changeToken).toBe('current-token');
-		expect(runChangeQuery).not.toHaveBeenCalled();
+		expect(runWithExpiry).not.toHaveBeenCalled();
+	});
+
+	describe('expired token', () => {
+		const oldToken = () =>
+			changes.createChangeTokenFromDate('list', LIST_ID, new Date(Date.now() - 75 * 864e5));
+		const itemAdd = {
+			'odata.type': 'SP.ChangeItem',
+			ChangeType: 1,
+			ChangeToken: { StringValue: 't1' },
+		};
+
+		async function expiredState(): Promise<IDataObject> {
+			const staticData: IDataObject = {};
+			await poll(createContext({}, staticData));
+			staticData.changeToken = oldToken();
+			return staticData;
+		}
+
+		beforeEach(() => {
+			runWithExpiry.mockImplementation(original.runChangeQueryWithExpiry);
+		});
+
+		it('emits the oldest available changes with tokenExpired by default', async () => {
+			const staticData = await expiredState();
+			target.getChanges.mockResolvedValueOnce([itemAdd]).mockResolvedValueOnce([]);
+
+			const result = await poll(createContext({ events: ['itemCreated'] }, staticData));
+
+			expect(result?.[0].map((item) => item.json.tokenExpired)).toEqual([true]);
+			expect(staticData.changeToken).toBe('t1');
+			const [query] = target.getChanges.mock.calls[0] as [changes.ChangeQuery];
+			expect(query.IgnoreStartTokenNotFoundError).toBe(true);
+		});
+
+		it('saves the current token and emits nothing with "Start From Now"', async () => {
+			const staticData = await expiredState();
+
+			const result = await poll(
+				createContext({ events: ['itemCreated'], options: { onExpiredToken: 'now' } }, staticData),
+			);
+
+			expect(result).toBeNull();
+			expect(staticData.changeToken).toBe('current-token');
+			expect(target.getChanges).not.toHaveBeenCalled();
+		});
+
+		it('fails and keeps the token with "Fail"', async () => {
+			const staticData = await expiredState();
+			const token = staticData.changeToken;
+
+			await expect(
+				poll(createContext({ options: { onExpiredToken: 'fail' } }, staticData)),
+			).rejects.toThrow('The change token has expired');
+			expect(staticData.changeToken).toBe(token);
+		});
 	});
 
 	it('returns the latest matching changes in manual mode and does not change the token', async () => {

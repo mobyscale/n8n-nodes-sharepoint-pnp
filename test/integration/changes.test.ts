@@ -1,6 +1,12 @@
 import type { IDataObject, IPollFunctions } from 'n8n-workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import {
+	buildChangeQuery,
+	CHANGE_LOG_RETENTION_MS,
+	createChangeTokenFromDate,
+	getChangeTarget,
+} from '../../nodes/SharePointPnp/shared/changes';
 import { SharePointPnpTrigger } from '../../nodes/SharePointPnpTrigger/SharePointPnpTrigger.node';
 import {
 	config,
@@ -251,5 +257,81 @@ describe.runIf(hasConfig)('change resource and trigger', () => {
 		expect(manualNames).toContain('delta.txt');
 		expect(manualNames).toContain('beta');
 		expect(staticData.changeToken).toBe(tokenBeforeManual);
+	});
+
+	// A token from before the change log takes long to read in a folder change log (about a minute).
+	it('handles a change token that is older than the change log', { timeout: 600_000 }, async () => {
+		const day = 24 * 60 * 60 * 1000;
+		const oldToken = createChangeTokenFromDate('list', listId, new Date(Date.now() - 75 * day));
+		const sp = createTestSp();
+		await sp.web
+			.getFolderByServerRelativePath(testFolder)
+			.files.addUsingPath('epsilon.txt', 'epsilon', { Overwrite: true });
+
+		// The real behavior of SharePoint Online: no "start token not found" error. It returns the
+		// changes that are still in the change log, so the node also checks the age of the token.
+		const target = getChangeTarget(sp, 'list', { mode: 'id', value: listId }, testFolder);
+		const raw = await target.getChanges(
+			buildChangeQuery({ objectTypes: ['Item'], changeTypes: ['Add'], startToken: oldToken }),
+		);
+		expect(raw.length).toBeGreaterThan(0);
+		for (const change of raw) {
+			expect(Date.parse(String(change.Time))).toBeGreaterThan(
+				Date.now() - CHANGE_LOG_RETENTION_MS - day,
+			);
+		}
+
+		const parameters = {
+			...listParameters(),
+			events: ['fileCreated'],
+			folderPathFilter: testFolder,
+			options: { includeItemDetails: true, resolveDeletedItems: false },
+		};
+		const trigger = new SharePointPnpTrigger();
+		const expiredState = async (options: IDataObject) => {
+			const staticData: IDataObject = {};
+			const withOptions = { ...parameters, options: { ...parameters.options, ...options } };
+			await trigger.poll.call(createPollContext(withOptions, staticData));
+			staticData.changeToken = oldToken;
+			return { staticData, context: () => createPollContext(withOptions, staticData) };
+		};
+
+		const now = await expiredState({ onExpiredToken: 'now' });
+		expect(await trigger.poll.call(now.context())).toBeNull();
+		expect(String(now.staticData.changeToken)).toMatch(/^1;3;/);
+		expect(now.staticData.changeToken).not.toBe(oldToken);
+
+		const fail = await expiredState({ onExpiredToken: 'fail' });
+		await expect(trigger.poll.call(fail.context())).rejects.toThrow('expired');
+		expect(fail.staticData.changeToken).toBe(oldToken);
+
+		const oldest = await expiredState({});
+		const result = await trigger.poll.call(oldest.context());
+		const emitted = (result?.[0] ?? []).map((item) => item.json as ChangeOutput);
+		expect(emitted.map((change) => change.item?.name)).toContain('epsilon.txt');
+		for (const change of emitted) {
+			expect(change.tokenExpired).toBe(true);
+			if (change.item?.exists) {
+				expect(change.item.serverRelativeUrl?.startsWith(`${testFolder}/`)).toBe(true);
+			}
+		}
+		expect(oldest.staticData.changeToken).not.toBe(oldToken);
+
+		const getMany = (onExpiredToken: string) =>
+			runNode({
+				resource: 'change',
+				operation: 'getAll',
+				...listParameters(),
+				startFrom: 'date',
+				startDate: new Date(Date.now() - 75 * day).toISOString(),
+				objectTypes: ['Item'],
+				changeTypes: ['Add'],
+				returnAll: true,
+				options: { ...ownChangesOnly(), onExpiredToken, output: 'single' },
+			});
+		await expect(getMany('fail')).rejects.toThrow('expired');
+		const [single] = await getMany('now');
+		expect(single.json).toMatchObject({ changes: [], count: 0, tokenExpired: true });
+		expect(String(single.json.nextChangeToken)).toMatch(/^1;3;/);
 	});
 });
