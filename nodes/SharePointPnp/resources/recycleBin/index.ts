@@ -10,11 +10,13 @@ import {
 	ITEM_STATE_FIRST,
 	ITEM_STATE_SECOND,
 	mapItem,
+	RECYCLE_BIN_SELECT,
 	matchesFilters,
 	parseIds,
 	type RecycleBinFilters,
 	type RecycleBinRawItem,
 } from './helpers';
+import { selectionOptions, type SelectionValues } from '../../shared/selection';
 import { getSiteServerRelativeUrl } from '../../shared/utils';
 import { fetchRecycleBinPage, PAGE_SIZE, type RecycleBinScope } from './paging';
 
@@ -172,6 +174,22 @@ const description: INodeProperties[] = [
 			},
 		],
 	},
+	{
+		displayName: 'Options',
+		name: 'getAllOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['getAll']),
+		options: selectionOptions(RECYCLE_BIN_SELECT).map((option) =>
+			option.name === 'additionalProperties'
+				? {
+						...option,
+						description: `${option.description} They are added to the output under their SharePoint names.`,
+					}
+				: option,
+		),
+	},
 	{ ...idsProperty('The IDs of the items to restore'), displayOptions: show(['restore']) },
 	{
 		...idsProperty('The IDs of the items to delete for good. This cannot be undone'),
@@ -229,11 +247,16 @@ const restore = getAction((bin, id) => bin.getById(id).restore(), 'restored');
 const deletePermanently = getAction((bin, id) => bin.getById(id).delete(), 'deleted');
 const moveToSecondStage = getAction((bin, id) => bin.getById(id).moveToSecondStage(), 'moved');
 
+function hasExtra(selection: SelectionValues): boolean {
+	return Boolean(selection.additionalProperties?.length || selection.expand?.length);
+}
+
 async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const scope = this.getNodeParameter('scope', itemIndex, 'siteCollection') as RecycleBinScope;
 	const returnAll = this.getNodeParameter('returnAll', itemIndex, false) as boolean;
 	const limit = returnAll ? Infinity : (this.getNodeParameter('limit', itemIndex, 50) as number);
 	const filters = this.getNodeParameter('filters', itemIndex, {}) as RecycleBinFilters;
+	const selection = this.getNodeParameter('getAllOptions', itemIndex, {}) as SelectionValues;
 
 	const stages =
 		filters.stage === ITEM_STATE_FIRST || filters.stage === ITEM_STATE_SECOND
@@ -246,7 +269,7 @@ async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 		let pagingInfo: string | undefined;
 		let done = false;
 		while (!done && results.length < limit) {
-			const page = await fetchRecycleBinPage(sp, stage, pagingInfo, PAGE_SIZE);
+			const page = await fetchRecycleBinPage(sp, stage, pagingInfo, PAGE_SIZE, selection);
 			for (const item of page.items) {
 				if (matchesFilters(item, filters) && (!sitePath || isInSite(item, sitePath))) {
 					results.push(item);
@@ -259,7 +282,7 @@ async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 		}
 		if (results.length >= limit) break;
 	}
-	return results.map(mapItem);
+	return results.map((item) => mapItem(item, hasExtra(selection)));
 }
 
 export const recycleBinResource: ResourceModule = {
