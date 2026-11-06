@@ -120,6 +120,8 @@ regarding building community nodes:
 - Unit tests: `test/unit/*.test.ts` (`npm test`). Do not call SharePoint in unit tests.
 - Integration tests: `test/integration/*.test.ts` (`npm run test:integration`). Use `test/integration/harness.ts`.
   Create and change content only inside the folder from `createTestFolder()`, and remove it in `afterAll`.
+- Tests that create lists or document libraries must use `it.skip`. They are hard to delete and need manual cleanup.
+- Never change existing site content, site groups, or site-level permissions in tests.
 
 ### Rules for public content
 - This is a public npm package. Never put real tenant, site, library, folder, file, user or group names in code,
