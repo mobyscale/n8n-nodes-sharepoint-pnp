@@ -20,7 +20,9 @@ interface AssignmentJson {
 describe.runIf(hasConfig)('permission', () => {
 	let testFolder: string | undefined;
 	let visitorGroupId = 0;
+	let visitorGroupTitle = '';
 	let readRoleId = 0;
+	let contributeRoleId = 0;
 
 	const folderTarget = (path: string) => ({
 		target: 'folder',
@@ -50,8 +52,11 @@ describe.runIf(hasConfig)('permission', () => {
 	beforeAll(async () => {
 		testFolder = await createTestFolder();
 		const sp = createTestSp();
-		visitorGroupId = (await sp.web.associatedVisitorGroup.select('Id')()).Id;
+		const visitors = await sp.web.associatedVisitorGroup.select('Id', 'Title')();
+		visitorGroupId = visitors.Id;
+		visitorGroupTitle = visitors.Title;
 		readRoleId = (await sp.web.roleDefinitions.getByName('Read').select('Id')()).Id;
+		contributeRoleId = (await sp.web.roleDefinitions.getByName('Contribute').select('Id')()).Id;
 	});
 
 	afterAll(async () => {
@@ -190,6 +195,88 @@ describe.runIf(hasConfig)('permission', () => {
 		});
 		assignments = await getAssignments(path);
 		expect(assignments).toHaveLength(0);
+	});
+
+	it('adds, removes and sets role assignments from JSON', async () => {
+		const path = await createSubfolder('json');
+		const json = (value: unknown) => ({
+			inputMode: 'json',
+			roleAssignmentsJson: JSON.stringify(value),
+		});
+		const roleIds = async () =>
+			(await getAssignments(path))
+				.find((a) => a.principalId === visitorGroupId)
+				?.roleDefinitions.map((r) => r.id)
+				.sort();
+
+		const added = await runNode({
+			resource: 'permission',
+			operation: 'add',
+			...folderTarget(path),
+			...json([{ principal: visitorGroupTitle, principalType: 'group', roles: ['Read', 'Contribute'] }]),
+		});
+		expect(added[0].json).toMatchObject({ inheritanceBroken: true, added: 2 });
+		expect(await roleIds()).toEqual([readRoleId, contributeRoleId].sort());
+
+		await runNode({
+			resource: 'permission',
+			operation: 'remove',
+			...folderTarget(path),
+			...json([{ principal: String(visitorGroupId), role: 'Contribute' }]),
+		});
+		expect(await roleIds()).toEqual([readRoleId]);
+
+		const removed = await runNode({
+			resource: 'permission',
+			operation: 'remove',
+			...folderTarget(path),
+			...json([{ principal: visitorGroupTitle }]),
+		});
+		expect(removed[0].json.removed).toEqual([{ principalId: visitorGroupId, allRolesRemoved: true }]);
+		expect(await roleIds()).toBeUndefined();
+
+		const set = await runNode({
+			resource: 'permission',
+			operation: 'set',
+			...folderTarget(path),
+			...json([{ principal: visitorGroupTitle, role: String(readRoleId) }]),
+		});
+		expect(set[0].json).toMatchObject({ added: 1 });
+		expect(await roleIds()).toEqual([readRoleId]);
+
+		await runNode({
+			resource: 'permission',
+			operation: 'set',
+			...folderTarget(path),
+			...json([]),
+		});
+		expect(await getAssignments(path)).toHaveLength(0);
+	});
+
+	it('rejects invalid or unknown JSON before it changes anything', async () => {
+		const path = await createSubfolder('json-invalid');
+		await expect(
+			runNode({
+				resource: 'permission',
+				operation: 'add',
+				...folderTarget(path),
+				inputMode: 'json',
+				roleAssignmentsJson: '[{ "principal": "x" }]',
+			}),
+		).rejects.toThrow(/entry 1 needs a "role" or "roles"/);
+		await expect(
+			runNode({
+				resource: 'permission',
+				operation: 'add',
+				...folderTarget(path),
+				inputMode: 'json',
+				roleAssignmentsJson: JSON.stringify([
+					{ principal: visitorGroupTitle, role: 'Read' },
+					{ principal: '__pnp-test-missing-group', role: 'Read' },
+				]),
+			}),
+		).rejects.toThrow(/entry 2/);
+		expect((await getAssignments(path))[0].hasUniqueRoleAssignments).toBe(false);
 	});
 
 	it('rejects a remove on an inheriting folder', async () => {
