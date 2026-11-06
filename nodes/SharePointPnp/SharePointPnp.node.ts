@@ -6,7 +6,8 @@ import type {
 } from 'n8n-workflow';
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
-import * as listSearch from './methods/listSearch';
+import * as listSearchBase from './methods/listSearch';
+import * as listSearchPrincipals from './methods/listSearchPrincipals';
 import { resources } from './resources';
 import { getSiteUrl, siteRLC } from './shared/descriptions';
 import { toExecutionData, toNodeError } from './shared/utils';
@@ -64,7 +65,7 @@ export class SharePointPnp implements INodeType {
 		],
 	};
 
-	methods = { listSearch };
+	methods = { listSearch: { ...listSearchBase, ...listSearchPrincipals } };
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
