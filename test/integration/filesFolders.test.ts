@@ -1,6 +1,8 @@
 import type { IDataObject, IExecuteFunctions, INodeExecutionData } from 'n8n-workflow';
+import { sleep } from 'n8n-workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { deleteSourceFolderIfEmpty } from '../../nodes/SharePointPnp/shared/copyJob';
 import { undefinedIfNotFound } from '../../nodes/SharePointPnp/shared/filesFolders';
 import { joinPath, toServerRelativePath } from '../../nodes/SharePointPnp/shared/utils';
 import { SharePointPnp } from '../../nodes/SharePointPnp/SharePointPnp.node';
@@ -45,6 +47,21 @@ const folder = (operation: string, parameters: IDataObject = {}) =>
 	run({ resource: 'folder', operation, ...parameters });
 const fileFolder = (operation: string, parameters: IDataObject = {}) =>
 	run({ resource: 'fileFolder', operation, ...parameters });
+
+const listFiles = (path: string) =>
+	fileFolder('getAll', {
+		folderPath: locator(path),
+		recursive: true,
+		returnAll: true,
+		include: 'files',
+		filters: {},
+		options: {},
+	});
+
+const exists = async (...paths: string[]) =>
+	(await fileFolder('checkExists', { paths: { values: paths.map((path) => ({ path })) } })).map(
+		(item) => item.json.exists,
+	);
 
 /** SharePoint answers 400 or 404 when a recycle bin item is already gone. */
 async function ignoreMissing(request: Promise<void>): Promise<void> {
@@ -274,6 +291,7 @@ describe.runIf(hasConfig)('files and folders', () => {
 		const copied = await file('copy', {
 			filePath: locator(at('a', 'upload.txt')),
 			destinationFolder: locator(at('target')),
+			method: 'direct',
 			options: { newName: 'copy.txt' },
 		});
 		expect(copied[0].json.ServerRelativeUrl).toBe(at('target', 'copy.txt'));
@@ -282,12 +300,14 @@ describe.runIf(hasConfig)('files and folders', () => {
 			file('copy', {
 				filePath: locator(at('a', 'upload.txt')),
 				destinationFolder: locator(at('target')),
+				method: 'direct',
 				options: { newName: 'copy.txt' },
 			}),
 		).rejects.toThrow();
 		const kept = await file('copy', {
 			filePath: locator(at('a', 'upload.txt')),
 			destinationFolder: locator(at('target')),
+			method: 'direct',
 			options: { newName: 'copy.txt', ifExists: 'keepBoth' },
 		});
 		expect(kept[0].json.sourcePath).toBe(at('a', 'upload.txt'));
@@ -295,6 +315,7 @@ describe.runIf(hasConfig)('files and folders', () => {
 		const moved = await file('move', {
 			filePath: locator(at('target', 'copy.txt')),
 			destinationFolder: locator(at('a', 'b')),
+			method: 'direct',
 			options: { ifExists: 'replace' },
 		});
 		expect(moved[0].json.ServerRelativeUrl).toBe(at('a', 'b', 'copy.txt'));
@@ -382,39 +403,26 @@ describe.runIf(hasConfig)('files and folders', () => {
 			folderPath: locator(at('many')),
 			destinationFolder: locator(at('target', 'jobs')),
 			method: 'copyJob',
-			options: { newName: 'job-copy' },
-			copyJobOptions: { waitForCompletion: true },
+			copyJobNewName: 'job-copy',
+			waitForCompletion: true,
 		});
+		expect(copied[0].json.status).toBe('completed');
 		expect(copied[0].json.completed).toBe(true);
-		const copyEntries = await fileFolder('getAll', {
-			folderPath: locator(at('target', 'jobs', 'job-copy')),
-			recursive: true,
-			returnAll: true,
-			include: 'files',
-			filters: {},
-			options: {},
-		});
-		expect(copyEntries).toHaveLength(3);
+		expect(copied[0].json.destinationPath).toBe(at('target', 'jobs', 'job-copy'));
+		expect(copied[0].json.summary).toMatchObject({ files: 3, errors: 0 });
+		expect(copied[0].json.jobId).toEqual(expect.any(String));
+		expect(await listFiles(at('target', 'jobs', 'job-copy'))).toHaveLength(3);
 
 		const moved = await folder('move', {
 			folderPath: locator(at('target', 'jobs', 'job-copy')),
 			destinationFolder: locator(at('a')),
 			method: 'copyJob',
-			options: { newName: 'job-moved' },
+			copyJobNewName: 'job-moved',
 			copyJobOptions: {},
 		});
-		expect(moved[0].json.completed).toBe(true);
-		const listFiles = (path: string) =>
-			fileFolder('getAll', {
-				folderPath: locator(path),
-				recursive: true,
-				returnAll: true,
-				include: 'files',
-				filters: {},
-				options: {},
-			});
+		expect(moved[0].json.status).toBe('completed');
 		expect(await listFiles(at('a', 'job-moved'))).toHaveLength(3);
-		expect(await listFiles(at('target', 'jobs', 'job-copy'))).toHaveLength(0);
+		expect(await exists(at('target', 'jobs', 'job-copy'))).toEqual([false]);
 	});
 
 	it('renames a folder', async () => {
@@ -463,6 +471,200 @@ describe.runIf(hasConfig)('files and folders', () => {
 			},
 		});
 		expect(result.map((item) => item.json.exists)).toEqual([false, false, false, false]);
+	});
+
+	describe('copy jobs', () => {
+		const uploadText = (folderPath: string, name: string) =>
+			file(
+				'upload',
+				{
+					folderPath: locator(folderPath),
+					fileName: name,
+					binaryPropertyName: 'data',
+					options: {},
+				},
+				[toBinaryItem(Buffer.from(`content of ${name}`), name)],
+			);
+
+		async function makeTree(root: string) {
+			await folder('create', { folderPath: locator(joinPath(root, 'sub')) });
+			await uploadText(root, 'one.txt');
+			await uploadText(joinPath(root, 'sub'), 'two.txt');
+		}
+
+		async function waitForFinish(job: IDataObject): Promise<IDataObject> {
+			for (let attempt = 0; attempt < 60; attempt++) {
+				const [status] = await fileFolder('getCopyJobStatus', { jobInfo: job });
+				if (status.json.finished) return status.json;
+				await sleep(2000);
+			}
+			throw new Error('The copy job did not finish in time');
+		}
+
+		it('copies and moves a single file with a copy job', async () => {
+			await folder('create', { folderPath: locator(at('cj-file', 'dst')) });
+			await uploadText(at('cj-file'), 'single.txt');
+
+			const copied = await file('copy', {
+				filePath: locator(at('cj-file', 'single.txt')),
+				destinationFolder: locator(at('cj-file', 'dst')),
+				method: 'copyJob',
+				copyJobNewName: 'copied.txt',
+			});
+			expect(copied[0].json.status).toBe('completed');
+			expect(copied[0].json.destinationPath).toBe(at('cj-file', 'dst', 'copied.txt'));
+			expect(copied[0].json.Name).toBe('copied.txt');
+			expect(await exists(at('cj-file', 'single.txt'))).toEqual([true]);
+
+			const moved = await file('move', {
+				filePath: locator(at('cj-file', 'single.txt')),
+				destinationFolder: locator(at('cj-file', 'dst')),
+				method: 'copyJob',
+			});
+			expect(moved[0].json.status).toBe('completed');
+			expect(moved[0].json.Name).toBe('single.txt');
+			expect(await exists(at('cj-file', 'single.txt'), at('cj-file', 'dst', 'single.txt'))).toEqual(
+				[false, true],
+			);
+		});
+
+		it('moves a folder and leaves no source folder behind', async () => {
+			await makeTree(at('cj-move', 'src'));
+			await folder('create', { folderPath: locator(at('cj-move', 'dst')) });
+
+			const moved = await folder('move', {
+				folderPath: locator(at('cj-move', 'src')),
+				destinationFolder: locator(at('cj-move', 'dst')),
+				method: 'copyJob',
+				copyJobOptions: { deleteEmptySourceFolder: true },
+			});
+			expect(moved[0].json.status).toBe('completed');
+			expect(moved[0].json.summary).toMatchObject({ files: 2, errors: 0 });
+			expect(await exists(at('cj-move', 'src'))).toEqual([false]);
+			expect(await listFiles(at('cj-move', 'dst', 'src'))).toHaveLength(2);
+		});
+
+		it('keeps the source with the option "Move But Keep Source"', async () => {
+			await makeTree(at('cj-keep', 'src'));
+			await folder('create', { folderPath: locator(at('cj-keep', 'dst')) });
+
+			const moved = await folder('move', {
+				folderPath: locator(at('cj-keep', 'src')),
+				destinationFolder: locator(at('cj-keep', 'dst')),
+				method: 'copyJob',
+				copyJobOptions: { moveButKeepSource: true },
+			});
+			expect(moved[0].json.status).toBe('completed');
+			expect(moved[0].json.sourceFolderDeleted).toBeUndefined();
+			expect(await listFiles(at('cj-keep', 'src'))).toHaveLength(2);
+			expect(await listFiles(at('cj-keep', 'dst', 'src'))).toHaveLength(2);
+		});
+
+		it('deletes a source folder only when it is empty', async () => {
+			await folder('create', { folderPath: locator(at('cj-empty', 'empty')) });
+			await folder('create', { folderPath: locator(at('cj-empty', 'full')) });
+			await uploadText(at('cj-empty', 'full'), 'keep.txt');
+			const sp = createTestSp();
+
+			expect(await deleteSourceFolderIfEmpty(sp, at('cj-empty', 'full'))).toBe(false);
+			expect(await deleteSourceFolderIfEmpty(sp, at('cj-empty', 'empty'))).toBe(true);
+			expect(await deleteSourceFolderIfEmpty(sp, at('cj-empty', 'empty'))).toBe(false);
+			expect(await exists(at('cj-empty', 'full', 'keep.txt'), at('cj-empty', 'empty'))).toEqual([
+				true,
+				false,
+			]);
+		});
+
+		it('resets role inheritance of the moved folder', async () => {
+			await makeTree(at('cj-role', 'src'));
+			await folder('create', { folderPath: locator(at('cj-role', 'dst')) });
+
+			const moved = await folder('move', {
+				folderPath: locator(at('cj-role', 'src')),
+				destinationFolder: locator(at('cj-role', 'dst')),
+				method: 'copyJob',
+				copyJobOptions: { resetRoleInheritanceAfterMove: true },
+			});
+			expect(moved[0].json.status).toBe('completed');
+			expect(moved[0].json.roleInheritanceReset).toBe(true);
+		});
+
+		it('starts a job without waiting and follows it with Get Copy Job Status', async () => {
+			await makeTree(at('cj-async', 'src'));
+			await folder('create', { folderPath: locator(at('cj-async', 'dst')) });
+
+			const started = await folder('copy', {
+				folderPath: locator(at('cj-async', 'src')),
+				destinationFolder: locator(at('cj-async', 'dst')),
+				method: 'copyJob',
+				waitForCompletion: false,
+			});
+			const job = started[0].json;
+			expect(job.status).toBe('running');
+			expect(job.finished).toBe(false);
+			expect(job.jobId).toEqual(expect.any(String));
+			expect(job.jobQueueUri).toEqual(expect.any(String));
+			expect(job.encryptionKey).toEqual(expect.any(String));
+			expect(job.sourcePath).toBe(at('cj-async', 'src'));
+			expect(job.destinationPath).toBe(at('cj-async', 'dst', 'src'));
+
+			const status = await waitForFinish(job);
+			expect(status.status).toBe('completed');
+			expect(status.sourcePath).toBe(at('cj-async', 'src'));
+			expect(await listFiles(at('cj-async', 'dst', 'src'))).toHaveLength(2);
+		});
+
+		it('returns a running job when the maximum wait passes', async () => {
+			await makeTree(at('cj-slow', 'src'));
+			await folder('create', { folderPath: locator(at('cj-slow', 'dst')) });
+
+			const result = await folder('copy', {
+				folderPath: locator(at('cj-slow', 'src')),
+				destinationFolder: locator(at('cj-slow', 'dst')),
+				method: 'copyJob',
+				waitForCompletion: true,
+				maxWaitSeconds: 1,
+			});
+			expect(['running', 'completed']).toContain(result[0].json.status);
+			if (result[0].json.status === 'running') {
+				expect((await waitForFinish(result[0].json)).status).toBe('completed');
+			}
+		});
+
+		it('fails or keeps both when the name exists', async () => {
+			await makeTree(at('cj-conflict', 'src'));
+			await folder('create', { folderPath: locator(at('cj-conflict', 'dst')) });
+			const parameters = {
+				folderPath: locator(at('cj-conflict', 'src')),
+				destinationFolder: locator(at('cj-conflict', 'dst')),
+				method: 'copyJob',
+			};
+			await folder('copy', parameters);
+
+			await expect(folder('copy', { ...parameters, nameConflictBehavior: 'fail' })).rejects.toThrow(
+				/copy job/,
+			);
+			const reported = await folder('copy', {
+				...parameters,
+				nameConflictBehavior: 'fail',
+				copyJobOptions: { continueOnJobErrors: true },
+			});
+			expect(reported[0].json.status).toBe('failed');
+			expect((reported[0].json.summary as IDataObject).errors).toBeGreaterThan(0);
+
+			const kept = await folder('copy', { ...parameters, nameConflictBehavior: 'keepBoth' });
+			expect(kept[0].json.status).toBe('completed');
+			expect(kept[0].json.destinationPath).not.toBe(at('cj-conflict', 'dst', 'src'));
+			const entries = await fileFolder('getAll', {
+				folderPath: locator(at('cj-conflict', 'dst')),
+				recursive: false,
+				returnAll: true,
+				include: 'folders',
+				filters: {},
+				options: {},
+			});
+			expect(entries).toHaveLength(2);
+		});
 	});
 
 	it('checks one path for each input item', async () => {
