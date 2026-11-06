@@ -10,6 +10,7 @@ import * as listSearchBase from './methods/listSearch';
 import * as listSearchFields from './methods/listSearchFields';
 import * as listSearchPrincipals from './methods/listSearchPrincipals';
 import * as listSearchSite from './methods/listSearchSite';
+import * as listSearchTaxonomy from './methods/listSearchTaxonomy';
 import { getListItemFields } from './methods/resourceMapping';
 import { resources } from './resources';
 import { getSiteUrl, siteRLC } from './shared/descriptions';
@@ -69,7 +70,7 @@ export class SharePointPnp implements INodeType {
 	};
 
 	methods = {
-		listSearch: { ...listSearchBase, ...listSearchPrincipals },
+		listSearch: { ...listSearchBase, ...listSearchPrincipals, ...listSearchTaxonomy },
 		loadOptions: { ...listSearchFields, ...listSearchSite },
 		resourceMapping: { getListItemFields },
 	};
