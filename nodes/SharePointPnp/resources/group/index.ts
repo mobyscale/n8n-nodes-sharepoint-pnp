@@ -12,6 +12,7 @@ import {
 	resolvePrincipalReference,
 	type LocatorValue,
 } from '../../shared/securables';
+import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import type { OperationContext, ResourceModule } from '../types';
 
 const RESOURCE = 'group';
@@ -228,6 +229,33 @@ const description: INodeProperties[] = [
 		description: 'Max number of results to return',
 		displayOptions: show(['getAll', 'getMembers'], { returnAll: [false] }),
 	},
+	{
+		displayName: 'Options',
+		name: 'getOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['get']),
+		options: selectionOptions(GROUP_SELECT),
+	},
+	{
+		displayName: 'Options',
+		name: 'getAllOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['getAll']),
+		options: selectionOptions(GROUP_SELECT),
+	},
+	{
+		displayName: 'Options',
+		name: 'getMembersOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['getMembers']),
+		options: selectionOptions(USER_SELECT),
+	},
 ];
 
 function buildProperties(fields: GroupFields): IDataObject {
@@ -278,19 +306,27 @@ async function setOwner(
 	await sp.web.siteGroups.getById(groupId).setUserAsOwner(ownerId);
 }
 
-async function readGroup(sp: SPFI, groupId: number): Promise<IDataObject> {
-	return (await sp.web.siteGroups
-		.getById(groupId)
-		.select(...GROUP_SELECT)()) as unknown as IDataObject;
+async function readGroup(
+	sp: SPFI,
+	groupId: number,
+	options: SelectionValues = {},
+): Promise<IDataObject> {
+	return (await applySelection(
+		sp.web.siteGroups.getById(groupId),
+		GROUP_SELECT,
+		options,
+	)()) as unknown as IDataObject;
 }
 
 async function get(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
-	return await readGroup(sp, await getGroupId.call(this, sp, itemIndex));
+	const options = this.getNodeParameter('getOptions', itemIndex, {}) as SelectionValues;
+	return await readGroup(sp, await getGroupId.call(this, sp, itemIndex), options);
 }
 
 async function getAll(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
 	const returnAll = this.getNodeParameter('returnAll', itemIndex) as boolean;
-	let query = sp.web.siteGroups.select(...GROUP_SELECT);
+	const options = this.getNodeParameter('getAllOptions', itemIndex, {}) as SelectionValues;
+	let query = applySelection(sp.web.siteGroups, GROUP_SELECT, options);
 	if (!returnAll) query = query.top(this.getNodeParameter('limit', itemIndex) as number);
 	return (await query()) as unknown as IDataObject[];
 }
@@ -329,7 +365,8 @@ async function deleteGroup(this: IExecuteFunctions, { sp, itemIndex }: Operation
 async function getMembers(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
 	const groupId = await getGroupId.call(this, sp, itemIndex);
 	const returnAll = this.getNodeParameter('returnAll', itemIndex) as boolean;
-	let query = sp.web.siteGroups.getById(groupId).users.select(...USER_SELECT);
+	const options = this.getNodeParameter('getMembersOptions', itemIndex, {}) as SelectionValues;
+	let query = applySelection(sp.web.siteGroups.getById(groupId).users, USER_SELECT, options);
 	if (!returnAll) query = query.top(this.getNodeParameter('limit', itemIndex) as number);
 	return (await query()) as unknown as IDataObject[];
 }
