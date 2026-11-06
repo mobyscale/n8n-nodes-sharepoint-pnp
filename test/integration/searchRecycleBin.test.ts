@@ -137,6 +137,22 @@ describe.runIf(hasConfig)('recycle bin', () => {
 		});
 		expect(String(match!.json.dirName)).toContain('__pnp-test-');
 
+		const withAuthor = await bin('getAll', {
+			returnAll: true,
+			filters: { text: fileName, itemType: 1, stage: 1, deletedAfter },
+			getAllOptions: { additionalProperties: 'Author/Title' },
+		});
+		const authored = withAuthor.find((item) => item.json.id === firstId);
+		expect(authored?.json.leafName).toBe(fileName);
+		expect(authored?.json.Author).toBeDefined();
+
+		const everything = await bin('getAll', {
+			returnAll: true,
+			filters: { text: fileName, itemType: 1, stage: 1, deletedAfter },
+			getAllOptions: { returnAllProperties: true },
+		});
+		expect(everything.some((item) => item.json.id === firstId)).toBe(true);
+
 		const inSite = await runNode({
 			resource: 'recycleBin',
 			operation: 'getAll',

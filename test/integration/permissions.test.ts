@@ -62,6 +62,17 @@ describe.runIf(hasConfig)('permission', () => {
 		const items = await getAssignments(testFolder!);
 		expect(items.length).toBeGreaterThan(0);
 		expect(items[0].hasUniqueRoleAssignments).toBe(false);
+		expect(items[0]).not.toHaveProperty('properties');
+
+		const detailed = await runNode({
+			resource: 'permission',
+			operation: 'getAll',
+			...folderTarget(testFolder!),
+			getAllOptions: { additionalProperties: 'Member/IsHiddenInUI' },
+		});
+		expect(detailed[0].json.roleDefinitions).toBeDefined();
+		const properties = detailed[0].json.properties as { Member: { IsHiddenInUI?: boolean } };
+		expect(properties.Member.IsHiddenInUI).toBeDefined();
 	});
 
 	it('breaks inheritance, adds, removes and resets on a subfolder', async () => {
@@ -251,6 +262,22 @@ describe.runIf(hasConfig)('group and user', () => {
 			group: locator(groupName, 'name'),
 		});
 		expect(fetched[0].json.Id).toBe(groupId);
+		expect(fetched[0].json).toHaveProperty('OwnerTitle');
+
+		const withOwner = await runNode({
+			resource: 'group',
+			operation: 'get',
+			group: locator(groupName, 'name'),
+			getOptions: { additionalProperties: 'Owner/Title' },
+		});
+		expect(withOwner[0].json.Owner).toBeDefined();
+		const everything = await runNode({
+			resource: 'group',
+			operation: 'get',
+			group: locator(groupName, 'name'),
+			getOptions: { returnAllProperties: true },
+		});
+		expect(everything[0].json.Id).toBe(groupId);
 
 		const updated = await runNode({
 			resource: 'group',
@@ -265,6 +292,14 @@ describe.runIf(hasConfig)('group and user', () => {
 	it('finds the group in Get Many', async () => {
 		const items = await runNode({ resource: 'group', operation: 'getAll', returnAll: true });
 		expect(items.some((item) => item.json.Id === groupId)).toBe(true);
+
+		const withOwner = await runNode({
+			resource: 'group',
+			operation: 'getAll',
+			returnAll: true,
+			getAllOptions: { additionalProperties: 'Owner/Title' },
+		});
+		expect(withOwner.find((item) => item.json.Id === groupId)?.json.Owner).toBeDefined();
 	});
 
 	it('adds and removes a member', async () => {
@@ -279,6 +314,17 @@ describe.runIf(hasConfig)('group and user', () => {
 			returnAll: true,
 		});
 		expect(members.some((item) => item.json.Id === member!.Id)).toBe(true);
+
+		const detailed = await runNode({
+			resource: 'group',
+			operation: 'getMembers',
+			group,
+			returnAll: true,
+			getMembersOptions: { additionalProperties: 'UserPrincipalName' },
+		});
+		expect(detailed.find((item) => item.json.Id === member!.Id)?.json).toHaveProperty(
+			'UserPrincipalName',
+		);
 
 		await runNode({ resource: 'group', operation: 'removeMember', group, user: member.Email });
 		members = await runNode({
@@ -310,6 +356,16 @@ describe.runIf(hasConfig)('group and user', () => {
 		});
 		expect(byEmail[0].json.Id).toBe(member.Id);
 
+		const everything = await runNode({
+			resource: 'user',
+			operation: 'get',
+			identifyBy: 'email',
+			email: member.Email,
+			getOptions: { returnAllProperties: true },
+		});
+		expect(everything[0].json.Id).toBe(member.Id);
+		expect(everything[0].json).toHaveProperty('Expiration');
+
 		const byId = await runNode({
 			resource: 'user',
 			operation: 'get',
@@ -329,5 +385,15 @@ describe.runIf(hasConfig)('group and user', () => {
 		});
 		expect(many.length).toBeGreaterThan(0);
 		expect(many.every((item) => item.json.PrincipalType === 1)).toBe(true);
+
+		const slim = await runNode({
+			resource: 'user',
+			operation: 'getAll',
+			returnAll: false,
+			limit: 1,
+			filters: {},
+			getAllOptions: { additionalProperties: 'Expiration' },
+		});
+		expect(slim[0].json).toHaveProperty('Expiration');
 	});
 });
