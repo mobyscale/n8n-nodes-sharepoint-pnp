@@ -467,7 +467,7 @@ export function copyJobProperties(
 				type: 'boolean',
 				default: false,
 				description:
-					'Whether to keep the source after the move. This works like a copy that also keeps the version history and the metadata. Not deleted: the source items.',
+					'Whether to keep the source after the move. This works like a copy that also keeps the version history and the metadata.',
 			},
 			{
 				displayName: 'Reset Role Inheritance After Move',
