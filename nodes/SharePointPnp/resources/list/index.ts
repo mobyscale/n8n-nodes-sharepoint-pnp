@@ -13,6 +13,12 @@ import {
 	splitViewFields,
 	type DefaultColumnValue,
 } from './helpers';
+import * as setup from './setup';
+import {
+	SETUP_LIST_OPERATIONS,
+	setupDescription,
+	TARGET_OPERATIONS,
+} from './setupDescription';
 
 const show = (operation: string[]) => ({ show: { resource: ['list'], operation } });
 
@@ -98,6 +104,8 @@ const LIST_OPERATIONS = [
 	'copyView',
 	'getDefaultColumnValues',
 	'setDefaultColumnValues',
+	...SETUP_LIST_OPERATIONS,
+	...TARGET_OPERATIONS,
 ];
 
 const description: INodeProperties[] = [
@@ -108,6 +116,12 @@ const description: INodeProperties[] = [
 		noDataExpression: true,
 		displayOptions: { show: { resource: ['list'] } },
 		options: [
+			{
+				name: 'Add Content Type to List',
+				value: 'addContentType',
+				description: 'Add an existing site content type to a list',
+				action: 'Add a content type to a list',
+			},
 			{
 				name: 'Copy View',
 				value: 'copyView',
@@ -121,6 +135,12 @@ const description: INodeProperties[] = [
 				action: 'Create a list',
 			},
 			{
+				name: 'Create Field',
+				value: 'createField',
+				description: 'Create a field (column) in a list or in the site',
+				action: 'Create a field',
+			},
+			{
 				name: 'Create View',
 				value: 'createView',
 				description: 'Create a view in a list',
@@ -132,7 +152,19 @@ const description: INodeProperties[] = [
 				description: 'Delete a list or library, or move it to the recycle bin',
 				action: 'Delete a list',
 			},
+			{
+				name: 'Delete Field',
+				value: 'deleteField',
+				description: 'Delete a field (column) from a list or from the site',
+				action: 'Delete a field',
+			},
 			{ name: 'Get', value: 'get', description: 'Get a list or library', action: 'Get a list' },
+			{
+				name: 'Get Content Types',
+				value: 'getContentTypes',
+				description: 'Get the content types of a list or of the site',
+				action: 'Get content types',
+			},
 			{
 				name: 'Get Default Column Values',
 				value: 'getDefaultColumnValues',
@@ -158,15 +190,46 @@ const description: INodeProperties[] = [
 				action: 'Get views of a list',
 			},
 			{
+				name: 'Remove Content Type From List',
+				value: 'removeContentType',
+				description: 'Remove a content type from a list',
+				action: 'Remove a content type from a list',
+			},
+			{
 				name: 'Set Default Column Values',
 				value: 'setDefaultColumnValues',
 				description: 'Set the default column values of a folder in a library',
 				action: 'Set default column values',
 			},
+			{
+				name: 'Set Default Content Type',
+				value: 'setDefaultContentType',
+				description: 'Make a content type the default of a list',
+				action: 'Set the default content type of a list',
+			},
+			{
+				name: 'Update',
+				value: 'update',
+				description: 'Update the title, description and settings of a list',
+				action: 'Update a list',
+			},
+			{
+				name: 'Update Field',
+				value: 'updateField',
+				description: 'Update a field (column) of a list or of the site',
+				action: 'Update a field',
+			},
 		],
 		default: 'getAll',
 	},
-	{ ...listRLC, displayOptions: show(LIST_OPERATIONS) },
+	{
+		...listRLC,
+		displayOptions: {
+			show: { resource: ['list'], operation: LIST_OPERATIONS },
+			hide: { target: ['site'] },
+		},
+	},
+	...setupDescription,
 
 	{
 		displayName: 'Title',
@@ -367,7 +430,7 @@ const description: INodeProperties[] = [
 
 	{
 		displayName: 'Folder Path',
-		name: 'folderPath',
+		name: 'defaultsFolderPath',
 		type: 'string',
 		default: '',
 		required: true,
@@ -684,7 +747,7 @@ async function setDefaultColumnValues(
 ) {
 	// PnPjs list methods keep query state, so each call needs a new instance.
 	const list = () => getList.call(this, sp, itemIndex);
-	const folderPath = getPath.call(this, siteUrl, itemIndex, 'folderPath');
+	const folderPath = getPath.call(this, siteUrl, itemIndex, 'defaultsFolderPath');
 	const collection = this.getNodeParameter('defaultValues', itemIndex, {}) as {
 		values?: Array<{ name: string; value: string }>;
 	};
@@ -750,5 +813,13 @@ export const listResource: ResourceModule = {
 		copyView,
 		getDefaultColumnValues,
 		setDefaultColumnValues,
+		update: setup.update,
+		createField: setup.createField,
+		updateField: setup.updateField,
+		deleteField: setup.deleteField,
+		getContentTypes: setup.getContentTypes,
+		addContentType: setup.addContentType,
+		removeContentType: setup.removeContentType,
+		setDefaultContentType: setup.setDefaultContentType,
 	},
 };

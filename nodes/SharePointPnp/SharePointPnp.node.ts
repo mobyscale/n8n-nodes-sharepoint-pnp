@@ -9,6 +9,7 @@ import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 import * as listSearchBase from './methods/listSearch';
 import * as listSearchFields from './methods/listSearchFields';
 import * as listSearchPrincipals from './methods/listSearchPrincipals';
+import * as listSearchSite from './methods/listSearchSite';
 import * as listSearchTaxonomy from './methods/listSearchTaxonomy';
 import { getListItemFields } from './methods/resourceMapping';
 import { resources } from './resources';
@@ -70,7 +71,7 @@ export class SharePointPnp implements INodeType {
 
 	methods = {
 		listSearch: { ...listSearchBase, ...listSearchPrincipals, ...listSearchTaxonomy },
-		loadOptions: listSearchFields,
+		loadOptions: { ...listSearchFields, ...listSearchSite },
 		resourceMapping: { getListItemFields },
 	};
 

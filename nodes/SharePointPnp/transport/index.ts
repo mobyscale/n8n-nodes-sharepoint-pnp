@@ -1,11 +1,13 @@
 import type {
 	IDataObject,
 	IExecuteFunctions,
+	IHookFunctions,
 	IHttpRequestMethods,
 	IHttpRequestOptions,
 	ILoadOptionsFunctions,
 	IN8nHttpFullResponse,
 	IPollFunctions,
+	IWebhookFunctions,
 	JsonObject,
 } from 'n8n-workflow';
 import { NodeApiError, sleep } from 'n8n-workflow';
@@ -27,9 +29,15 @@ import '@pnp/sp/site-users/index.js';
 import '@pnp/sp/site-groups/index.js';
 import '@pnp/sp/search/index.js';
 import '@pnp/sp/recycle-bin/index.js';
+import '@pnp/sp/subscriptions/index.js';
 import '@pnp/sp/batching.js';
 
-export type SharePointContext = IExecuteFunctions | ILoadOptionsFunctions | IPollFunctions;
+export type SharePointContext =
+	| IExecuteFunctions
+	| ILoadOptionsFunctions
+	| IPollFunctions
+	| IHookFunctions
+	| IWebhookFunctions;
 
 export const DELEGATED_CREDENTIAL_TYPE = 'sharePointPnpOAuth2Api';
 export const APP_ONLY_CREDENTIAL_TYPE = 'sharePointPnpCertificateApi';

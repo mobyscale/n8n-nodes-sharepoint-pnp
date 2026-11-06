@@ -31,6 +31,32 @@ openssl pkcs12 -in certificate.pfx -nocerts -nodes -out private-key.pem
 openssl pkcs12 -in certificate.pfx -clcerts -nokeys -out certificate.pem
 ```
 
+## Triggers
+
+The package has two trigger nodes. Both read the SharePoint change log with change tokens, and both have the same events, folder path filter and options.
+
+- **SharePoint PnP Trigger** polls the change log of a site collection, a site or a list. It works without a public URL.
+- **SharePoint PnP Webhook Trigger** uses SharePoint list webhooks. SharePoint sends a notification when a list or library changes. The node then reads the changes since the last change token, applies the events and the folder path filter, and starts the workflow for the matching changes.
+
+n8n starts a poller for each node type that has a `poll` method, and registers webhooks for each node type that has `webhooks`. A parameter cannot turn one of them off, so the webhook mode is a separate node.
+
+### Webhook trigger
+
+- SharePoint must reach n8n from the internet over HTTPS. Set `WEBHOOK_URL` to the public URL of n8n. SharePoint validates the URL when it creates the subscription, and needs a response within 5 seconds.
+- "Listen for test event" creates a subscription for the test URL. It expires after one day, and n8n deletes it when the test ends.
+- When you activate the workflow, the node creates a list subscription with an expiration date of 179 days (the maximum is 180 days) and a random client state. It saves the subscription ID, the client state and the current change token in the static data of the workflow.
+- Each notification must have the saved client state. The node responds at once, and then reads the changes.
+- The node renews the subscription on activation and on a notification, when less than 30 days remain. A list that has no changes for more than 150 days can get to the expiration date. To create a new subscription, save the workflow again or deactivate and activate it.
+- When you deactivate the workflow, the node deletes the subscriptions of the list that send to the webhook URL of the node.
+
+### Expired change tokens
+
+SharePoint Online keeps the change log for 60 days. The **On Expired Token** option sets what happens when a change token is older:
+
+- **Start From Oldest Available Change** (default): return all changes that are still in the change log. All of them are newer than the token, so there are no duplicates. The changes before the start of the change log are lost. Each change has `tokenExpired: true`.
+- **Start From Now**: save the current token and return no changes.
+- **Fail**: stop with an error.
+
 ## Development
 
 ```bash

@@ -4,6 +4,7 @@ import { NodeOperationError } from 'n8n-workflow';
 import type {
 	ChangeOutputOptions,
 	ChangeScope,
+	ExpiredTokenMode,
 	LocatorValue,
 	QueryOptions,
 } from '../../shared/changes';
@@ -17,7 +18,7 @@ import {
 	objectTypesProperty,
 	queryOptionsProperty,
 	resolveFolderFilter,
-	runChangeQuery,
+	runChangeQueryWithExpiry,
 	showFor,
 	validateFlags,
 } from '../../shared/changes';
@@ -156,6 +157,7 @@ async function getAll(this: IExecuteFunctions, context: OperationContext) {
 	const limit = returnAll ? undefined : (this.getNodeParameter('limit', itemIndex) as number);
 	const queryOptions = this.getNodeParameter('queryOptions', itemIndex, {}) as QueryOptions;
 	const options = this.getNodeParameter('options', itemIndex, {}) as ChangeOutputOptions & {
+		onExpiredToken?: ExpiredTokenMode;
 		output?: string;
 	};
 	validateFlags(this.getNode(), objectTypes, changeTypes, itemIndex);
@@ -179,7 +181,7 @@ async function getAll(this: IExecuteFunctions, context: OperationContext) {
 	}
 
 	const query = buildChangeQuery({ objectTypes, changeTypes, startToken, queryOptions });
-	const result = await runChangeQuery(sp, target, query, {
+	const result = await runChangeQueryWithExpiry(sp, target, query, {
 		...options,
 		folderPathFilter,
 		returnAll,
@@ -189,11 +191,13 @@ async function getAll(this: IExecuteFunctions, context: OperationContext) {
 	if (options.output === 'single') {
 		const nextChangeToken =
 			result.nextChangeToken ?? startToken ?? (await target.getCurrentToken());
-		return {
+		const output: IDataObject = {
 			changes: result.changes,
 			nextChangeToken,
 			count: result.changes.length,
-		} as IDataObject;
+		};
+		if (result.tokenExpired) output.tokenExpired = true;
+		return output;
 	}
 	return result.changes;
 }
