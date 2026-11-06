@@ -103,34 +103,5 @@ regarding building community nodes:
 
 ## This project: n8n-nodes-sharepoint-pnp
 
-### Architecture
-- One programmatic node, `nodes/SharePointPnp/SharePointPnp.node.ts`, with a Resource and an Operation dropdown.
-- Each resource lives in `nodes/SharePointPnp/resources/<resource>/index.ts` and exports a `ResourceModule`
-  (`resources/types.ts`). The first entry of `description` must be the `operation` property. Operation handlers
-  get `{ sp, siteUrl, itemIndex }` and return JSON data or `INodeExecutionData[]`. The node adds `pairedItem`.
-- `resources/list/index.ts` is the reference implementation. Copy its style.
-- All SharePoint calls use PnPjs (`@pnp/sp`) through `createSp()` in `transport/index.ts`. Requests go through
-  `httpRequestWithAuthentication`, so n8n handles the token. Do not call `fetch` directly.
-- Every Get and Get Many operation uses `shared/selection.ts`: a documented default property set, plus the
-  options Additional Properties, Expand and Return All Properties (`selectionOptions`, `applySelection`).
-- Use the shared pickers and helpers in `shared/descriptions.ts` (site, list, library, path) and `shared/utils.ts`
-  (path handling, `isNotFoundError`, `toNodeError`). Paths accept site-relative, server-relative or absolute URLs.
-- PnPjs is ESM-only. It is a devDependency that `scripts/bundle.mjs` bundles into the node. Never add `dependencies`.
-- Do not use `setTimeout`. Use `sleep` from `n8n-workflow`. Do not use `process` or Node modules except `node:crypto`.
-
-### Tests
-- Unit tests: `test/unit/*.test.ts` (`npm test`). Do not call SharePoint in unit tests.
-- Integration tests: `test/integration/*.test.ts` (`npm run test:integration`). Use `test/integration/harness.ts`.
-  Create and change content only inside the folder from `createTestFolder()`, and remove it in `afterAll`.
-- Tests that create lists or document libraries must use `it.skip`. They are hard to delete and need manual cleanup.
-- Tests may only act on files, folders, list items and groups that the test created in its own setup, and must
-  clean them up afterward. Never read, copy, move, change or delete an existing file or folder that the test did not
-  create. The test library is only the container for the test folder.
-- Never change existing site content, site groups, or site-level permissions in tests.
-- Site-level and schema changes (site settings, property bag, site creation, hub sites, fields, content types,
-  list settings, term store writes) never run in integration tests. Only read tests run. Write tests use `it.skip`.
-
-### Rules for public content
-- This is a public npm package. Never put real tenant, site, library, folder, file, user or group names in code,
-  tests, commit messages or PR text. Use placeholders such as `contoso` and `/sites/Example`.
-- Run `npm run lint`, `npm run build` and `npm test` before each commit.
+The project rules, commands and architecture are in `CLAUDE.md`. Read it before you change code. It applies to
+all agents, not only Claude Code.
