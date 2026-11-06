@@ -8,7 +8,7 @@ import type {
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
 import * as listSearch from '../SharePointPnp/methods/listSearch';
-import type { ChangeScope, LocatorValue } from '../SharePointPnp/shared/changes';
+import type { ChangeScope, ExpiredTokenMode, LocatorValue } from '../SharePointPnp/shared/changes';
 import {
 	buildChangeQuery,
 	CHANGE_EVENTS,
@@ -18,6 +18,7 @@ import {
 	getEventFlags,
 	resolveFolderFilter,
 	runChangeQuery,
+	runChangeQueryWithExpiry,
 	showFor,
 	triggerOptionsProperty,
 } from '../SharePointPnp/shared/changes';
@@ -33,6 +34,7 @@ interface TriggerOptions {
 	fetchLimit?: number;
 	includeItemDetails?: boolean;
 	itemFields?: string;
+	onExpiredToken?: ExpiredTokenMode;
 	resolveDeletedItems?: boolean;
 	startFromDate?: string;
 }
@@ -177,11 +179,16 @@ export async function pollChanges(this: IPollFunctions): Promise<INodeExecutionD
 		startToken = createChangeTokenFromDate(scope, await target.getId(), date);
 	}
 
-	const result = await runChangeQuery(
+	const result = await runChangeQueryWithExpiry(
 		sp,
 		target,
 		buildChangeQuery({ ...flags, startToken, queryOptions }),
-		{ ...runOptions, returnAll: true, deadline: getDeadline(this) },
+		{
+			...runOptions,
+			returnAll: true,
+			deadline: getDeadline(this),
+			onExpiredToken: options.onExpiredToken,
+		},
 	);
 
 	state.changeToken = result.nextChangeToken ?? startToken;
