@@ -4,12 +4,14 @@ import type { SPFI } from '@pnp/sp/index.js';
 import { CheckinType } from '@pnp/sp/files/index.js';
 
 import { getPath, pathRLC } from '../../shared/descriptions';
+import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import { copyJobProperties, methodProperty, runMoveCopyJob } from '../../shared/copyJob';
 import {
 	buildMoveCopyOptions,
 	filePathRLC,
 	getDestinationPath,
 	undefinedIfNotFound,
+	withListItemFields,
 	type MoveCopyFields,
 } from '../../shared/filesFolders';
 import { joinPath, splitPath } from '../../shared/utils';
@@ -18,6 +20,39 @@ import type { OperationContext, ResourceModule } from '../types';
 const show = (operation: string[]) => ({ show: { resource: ['file'], operation } });
 
 const CHUNK_THRESHOLD = 10 * 1024 * 1024;
+
+const FILE_SELECT = [
+	'Name',
+	'ServerRelativeUrl',
+	'UniqueId',
+	'Length',
+	'TimeCreated',
+	'TimeLastModified',
+	'Title',
+	'MajorVersion',
+	'MinorVersion',
+	'UIVersion',
+	'UIVersionLabel',
+	'Level',
+	'CheckOutType',
+	'CheckInComment',
+	'ETag',
+	'Exists',
+	'LinkingUrl',
+	'ContentTag',
+	'CustomizedPageStatus',
+	'IrmEnabled',
+];
+
+const VERSION_SELECT = [
+	'ID',
+	'VersionLabel',
+	'Created',
+	'CheckInComment',
+	'IsCurrentVersion',
+	'Size',
+	'Url',
+];
 
 const ifExistsProperty: INodeProperties = {
 	displayName: 'If Exists',
@@ -211,14 +246,25 @@ const description: INodeProperties[] = [
 		default: {},
 		displayOptions: show(['get']),
 		options: [
+			...selectionOptions(FILE_SELECT),
 			{
 				displayName: 'Include List Item Fields',
 				name: 'includeListItem',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to add the list item fields of the file',
+				description:
+					'Whether to add the list item fields of the file. Same as adding ListItemAllFields to Expand. Kept for older workflows.',
 			},
 		],
+	},
+	{
+		displayName: 'Options',
+		name: 'versionOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['getVersions']),
+		options: selectionOptions(VERSION_SELECT),
 	},
 	{
 		...pathRLC({
@@ -360,11 +406,14 @@ async function download(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Ope
 
 async function get(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const path = getPath.call(this, siteUrl, itemIndex, 'filePath');
-	const options = this.getNodeParameter('options', itemIndex, {}) as { includeListItem?: boolean };
-	const query = getFile(sp, path);
-	return (await (options.includeListItem
-		? query.expand('ListItemAllFields')()
-		: query())) as unknown as IDataObject;
+	const options = this.getNodeParameter('options', itemIndex, {}) as SelectionValues & {
+		includeListItem?: boolean;
+	};
+	return (await applySelection(
+		getFile(sp, path),
+		FILE_SELECT,
+		withListItemFields(options),
+	)()) as unknown as IDataObject;
 }
 
 function moveCopy(kind: 'move' | 'copy') {
@@ -456,7 +505,12 @@ async function discardCheckOut(
 
 async function getVersions(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const path = getPath.call(this, siteUrl, itemIndex, 'filePath');
-	return (await getFile(sp, path).versions()) as unknown as IDataObject[];
+	const options = this.getNodeParameter('versionOptions', itemIndex, {}) as SelectionValues;
+	return (await applySelection(
+		getFile(sp, path).versions,
+		VERSION_SELECT,
+		options,
+	)()) as unknown as IDataObject[];
 }
 
 async function restoreVersion(
