@@ -111,6 +111,8 @@ regarding building community nodes:
 - `resources/list/index.ts` is the reference implementation. Copy its style.
 - All SharePoint calls use PnPjs (`@pnp/sp`) through `createSp()` in `transport/index.ts`. Requests go through
   `httpRequestWithAuthentication`, so n8n handles the token. Do not call `fetch` directly.
+- Every Get and Get Many operation uses `shared/selection.ts`: a documented default property set, plus the
+  options Additional Properties, Expand and Return All Properties (`selectionOptions`, `applySelection`).
 - Use the shared pickers and helpers in `shared/descriptions.ts` (site, list, library, path) and `shared/utils.ts`
   (path handling, `isNotFoundError`, `toNodeError`). Paths accept site-relative, server-relative or absolute URLs.
 - PnPjs is ESM-only. It is a devDependency that `scripts/bundle.mjs` bundles into the node. Never add `dependencies`.
@@ -125,6 +127,8 @@ regarding building community nodes:
   clean them up afterward. Never read, copy, move, change or delete an existing file or folder that the test did not
   create. The test library is only the container for the test folder.
 - Never change existing site content, site groups, or site-level permissions in tests.
+- Site-level and schema changes (site settings, property bag, site creation, hub sites, fields, content types,
+  list settings, term store writes) never run in integration tests. Only read tests run. Write tests use `it.skip`.
 
 ### Rules for public content
 - This is a public npm package. Never put real tenant, site, library, folder, file, user or group names in code,

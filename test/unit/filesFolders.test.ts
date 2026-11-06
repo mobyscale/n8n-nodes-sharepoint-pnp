@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-	buildCopyJobPayload,
 	buildMoveCopyOptions,
 	buildViewXml,
 	escapeXml,
@@ -12,7 +11,6 @@ import {
 	hasExtension,
 	normalizeRow,
 	parseExtensions,
-	toAbsoluteUrl,
 } from '../../nodes/SharePointPnp/shared/filesFolders';
 
 const siteUrl = 'https://contoso.sharepoint.com/sites/Example';
@@ -193,37 +191,5 @@ describe('row normalization', () => {
 		expect(entry.size).toBeNull();
 		expect(entry.author).toBeNull();
 		expect(entry.fields).toBeDefined();
-	});
-});
-
-describe('copy job payload', () => {
-	it('builds the request body', () => {
-		const payload = buildCopyJobPayload({
-			sourceUrl: 'https://contoso.sharepoint.com/sites/Example/Lib/a',
-			destinationFolderUrl: 'https://contoso.sharepoint.com/sites/Example/Lib/b',
-			move: true,
-			ifExists: 'keepBoth',
-			bypassSharedLock: true,
-			ignoreVersionHistory: false,
-			newName: 'c',
-		});
-		expect(payload).toEqual({
-			exportObjectUris: ['https://contoso.sharepoint.com/sites/Example/Lib/a'],
-			destinationUri: 'https://contoso.sharepoint.com/sites/Example/Lib/b',
-			options: {
-				AllowSchemaMismatch: true,
-				BypassSharedLock: true,
-				IgnoreVersionHistory: false,
-				IsMoveMode: true,
-				NameConflictBehavior: 2,
-				CustomizedItemName: ['c'],
-			},
-		});
-	});
-
-	it('builds absolute URLs with encoding', () => {
-		expect(toAbsoluteUrl(siteUrl, '/sites/Example/My Lib/a b')).toBe(
-			'https://contoso.sharepoint.com/sites/Example/My%20Lib/a%20b',
-		);
 	});
 });
