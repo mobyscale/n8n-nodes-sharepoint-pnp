@@ -11,13 +11,35 @@ import {
 	normalizeRow,
 	parseExtensions,
 	type FileFolderFilters,
+	VIEW_FIELDS,
 	undefinedIfNotFound,
 	type IncludeKind,
 } from '../../shared/filesFolders';
+import { selectionOptions, toList, type SelectionValues } from '../../shared/selection';
 import { toServerRelativePath } from '../../shared/utils';
 import type { OperationContext, ResourceModule } from '../types';
 
 const show = (operation: string[]) => ({ show: { resource: ['fileFolder'], operation } });
+
+const OUTPUT_PROPERTIES =
+	'name, type, serverRelativeUrl, uniqueId, listItemId, size, created, modified, author, editor';
+
+/** Get Many reads list item fields, so the options use field names and have no Expand. */
+const getAllSelectionOptions = (): INodeProperties[] => {
+	const [additional, , returnAll] = selectionOptions(VIEW_FIELDS);
+	return [
+		{
+			...additional,
+			placeholder: 'e.g. ContentTypeId, Title',
+			description: `Comma-separated internal names of list item fields to add to "fields" of each entry. Each entry always has the default properties (${OUTPUT_PROPERTIES}).`,
+		},
+		{
+			...returnAll,
+			description:
+				'Whether to add all list item fields of each entry in "fields", in addition to the default properties',
+		},
+	];
+};
 
 const description: INodeProperties[] = [
 	{
@@ -135,12 +157,14 @@ const description: INodeProperties[] = [
 		default: {},
 		displayOptions: show(['getAll']),
 		options: [
+			...getAllSelectionOptions(),
 			{
 				displayName: 'Include List Item Fields',
 				name: 'includeListItem',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to add all list item fields of each entry in "fields"',
+				description:
+					'Whether to add all list item fields of each entry in "fields". Same as Return All Properties. Kept for older workflows.',
 			},
 		],
 	},
@@ -211,9 +235,13 @@ async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 		FileFolderFilters,
 		'include'
 	> & { extensions?: string };
-	const options = this.getNodeParameter('options', itemIndex, {}) as { includeListItem?: boolean };
+	const options = this.getNodeParameter('options', itemIndex, {}) as Pick<
+		SelectionValues,
+		'additionalProperties' | 'returnAllProperties'
+	> & { includeListItem?: boolean };
 	const extensions = parseExtensions(filters.extensions);
-	const includeListItem = options.includeListItem ?? false;
+	const includeListItem = options.includeListItem === true || options.returnAllProperties === true;
+	const extraFields = toList(options.additionalProperties);
 
 	const list = await findList(sp, folderPath);
 	if (!list) {
@@ -226,12 +254,16 @@ async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 	let outputView: string;
 	let foldersView: string;
 	try {
-		outputView = buildViewXml({
-			include: extensions.length && include === 'all' ? 'files' : include,
-			nameContains: filters.nameContains,
-			modifiedAfter: filters.modifiedAfter,
-			modifiedBefore: filters.modifiedBefore,
-		});
+		outputView = buildViewXml(
+			{
+				include: extensions.length && include === 'all' ? 'files' : include,
+				nameContains: filters.nameContains,
+				modifiedAfter: filters.modifiedAfter,
+				modifiedBefore: filters.modifiedBefore,
+			},
+			500,
+			extraFields,
+		);
 		foldersView = buildViewXml({ include: 'folders' });
 	} catch (error) {
 		throw new NodeOperationError(this.getNode(), error as Error, { itemIndex });
@@ -255,7 +287,7 @@ async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 				query,
 			);
 			for (const row of page.Row as unknown as IDataObject[]) {
-				found.push(normalizeRow(row, includeListItem));
+				found.push(normalizeRow(row, includeListItem, extraFields));
 				if (found.length >= max) break;
 			}
 			if (!page.NextHref) break;
