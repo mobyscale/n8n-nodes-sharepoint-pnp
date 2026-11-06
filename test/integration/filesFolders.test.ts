@@ -374,6 +374,90 @@ describe.runIf(hasConfig)('files and folders', () => {
 		expect(old.map((item) => item.json.exists)).toEqual([false, true]);
 	});
 
+	describe('publishing', () => {
+		interface LibrarySettings {
+			EnableMinorVersions: boolean;
+			EnableModeration: boolean;
+		}
+
+		async function readSettings(): Promise<LibrarySettings> {
+			const root = toServerRelativePath(config!.siteUrl, config!.libraryPath).toLowerCase();
+			const lists = (await createTestSp()
+				.web.lists.select('EnableMinorVersions', 'EnableModeration', 'RootFolder/ServerRelativeUrl')
+				.expand('RootFolder')()) as unknown as Array<
+				LibrarySettings & { RootFolder: { ServerRelativeUrl: string } }
+			>;
+			const library = lists.find(
+				(list) => list.RootFolder.ServerRelativeUrl.toLowerCase() === root,
+			);
+			return library ?? { EnableMinorVersions: false, EnableModeration: false };
+		}
+
+		async function createFile(name: string): Promise<string> {
+			await file(
+				'upload',
+				{ folderPath: locator(testFolder), fileName: name, binaryPropertyName: 'data', options: {} },
+				[toBinaryItem(Buffer.from(name), name)],
+			);
+			return at(name);
+		}
+
+		const run = (operation: string, path: string) =>
+			file(operation, { filePath: locator(path), comment: 'integration test' });
+
+		it('publishes and unpublishes a file in a library with minor versions', async (context) => {
+			const settings = await readSettings();
+			if (!settings.EnableMinorVersions) {
+				context.skip('The test library has no minor versions. Settings are never changed.');
+			}
+			const path = await createFile('publish.txt');
+			const published = await run('publish', path);
+			expect(published[0].json.Level).toBe(1);
+			const unpublished = await run('unpublish', path);
+			expect(unpublished[0].json.Level).toBe(2);
+		});
+
+		it('approves and denies a file in a library with content approval', async (context) => {
+			const settings = await readSettings();
+			if (!settings.EnableModeration) {
+				context.skip('The test library has no content approval. Settings are never changed.');
+			}
+			const path = await createFile('approve.txt');
+			if (settings.EnableMinorVersions) await run('publish', path);
+			const approved = await run('approve', path);
+			expect(approved[0].json.moderationStatus).toBe(0);
+			await file(
+				'upload',
+				{
+					folderPath: locator(testFolder),
+					fileName: 'approve.txt',
+					binaryPropertyName: 'data',
+					options: { overwrite: true },
+				},
+				[toBinaryItem(Buffer.from('second'), 'approve.txt')],
+			);
+			if (settings.EnableMinorVersions) await run('publish', path);
+			const denied = await run('deny', path);
+			expect(denied[0].json.moderationStatus).toBe(1);
+		});
+
+		it('returns the SharePoint error when the library does not support the operation', async (context) => {
+			const settings = await readSettings();
+			if (settings.EnableMinorVersions && settings.EnableModeration) {
+				context.skip('The test library supports every publishing operation.');
+			}
+			const path = await createFile('unsupported.txt');
+			if (!settings.EnableMinorVersions) {
+				await expect(run('publish', path)).rejects.toThrow(/minor version/);
+				await expect(run('unpublish', path)).rejects.toThrow(/minor version/);
+			}
+			if (!settings.EnableModeration) {
+				await expect(run('approve', path)).rejects.toThrow(/content approval/);
+				await expect(run('deny', path)).rejects.toThrow(/content approval/);
+			}
+		});
+	});
+
 	it('checks out, checks in, lists and restores versions', async () => {
 		const path = at('a', 'upload.txt');
 		const checkedOut = await file('checkOut', { filePath: locator(path) });
