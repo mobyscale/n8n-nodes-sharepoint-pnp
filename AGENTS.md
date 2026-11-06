@@ -103,6 +103,22 @@ regarding building community nodes:
 
 ## This project: n8n-nodes-sharepoint-pnp
 
+### Commands
+- Install: `npm ci`. `.npmrc` sets `ignore-scripts=true`, because `isolated-vm` (a dependency of n8n-workflow)
+  does not build on current Node versions and is not necessary here.
+- `npm run build` runs `n8n-node build`, then `scripts/bundle.mjs` (esbuild bundles each node in `package.json`
+  `n8n.nodes` into one CJS file, with `n8n-workflow` as the only external).
+- `npm run dev` starts n8n at http://localhost:5678 with the nodes loaded. `docs/manual-test-checklist.md` is the
+  manual test plan.
+- `npm run lint`, `npm test` (unit), `npm run test:integration`.
+- One test file or test: `npx vitest run test/unit/selection.test.ts -t "expands"`. For integration tests, add
+  `--config vitest.integration.config.mts`.
+- Integration tests need an uncommitted `.env` (see `.env.example`) and a certificate key pair. The config file
+  reads them and passes them to the tests with vitest `provide`, because the lint rules do not allow `process`
+  or `fs` in test files. Without `.env`, every integration suite is skipped.
+- `n8n-node lint` also scans `.claude/worktrees` if agent worktrees exist. Use
+  `npx eslint . --ignore-pattern ".claude/**"` in that case.
+
 ### Architecture
 - One programmatic node, `nodes/SharePointPnp/SharePointPnp.node.ts`, with a Resource and an Operation dropdown.
 - Each resource lives in `nodes/SharePointPnp/resources/<resource>/index.ts` and exports a `ResourceModule`
@@ -117,6 +133,27 @@ regarding building community nodes:
   (path handling, `isNotFoundError`, `toNodeError`). Paths accept site-relative, server-relative or absolute URLs.
 - PnPjs is ESM-only. It is a devDependency that `scripts/bundle.mjs` bundles into the node. Never add `dependencies`.
 - Do not use `setTimeout`. Use `sleep` from `n8n-workflow`. Do not use `process` or Node modules except `node:crypto`.
+- All operation properties are merged into one node description. Two properties with the same `name` in
+  different resources must have the same `type`. If the types are different, give them different names.
+- There are three nodes. `SharePointPnpTrigger` polls the change log with change tokens. `SharePointPnpWebhookTrigger`
+  uses list webhooks. They are separate nodes because one n8n node type cannot both poll and receive webhooks. Both
+  use `shared/changes.ts` and `shared/changeTrigger.ts`. The webhook trigger uses `shared/subscriptions.ts`.
+- Change token contract: SharePoint Online does not return an error for a token older than its change log retention.
+  It returns changes from the start of the log. The code finds expired tokens by their age, and by default starts
+  from the oldest available change.
+- Credentials: `SharePointPnpOAuth2Api` (delegated, extends `microsoftOAuth2Api`) and `SharePointPnpCertificateApi`
+  (app-only). SharePoint REST does not accept app-only tokens from a client secret. The certificate credential
+  signs a JWT client assertion with `node:crypto` (`credentials/helpers/clientAssertion.ts`) in `preAuthentication`.
+  The node gets the credential type from its Authentication parameter (`getCredentialType` in `transport/index.ts`).
+- `transport/index.ts` replaces the PnPjs send step with `N8nSend`. It sends each request through
+  `httpRequestWithAuthentication` and returns a fetch `Response`. It retries 429, 503 and 504 with `Retry-After`.
+  It sends a 401 again so that n8n can refresh the token.
+- Some features do not use PnPjs methods:
+  - Taxonomy uses the CSOM endpoint `/_vti_bin/client.svc/ProcessQuery` (`resources/taxonomy/csom.ts`),
+    because the REST v2.1 term store returns 403 for a SharePoint app-only token.
+  - Copy and move with Copy Job use `CreateCopyJobs` and `GetCopyJobProgress` (`shared/copyJob.ts`). A move is
+    complete only when the job state is 0 (after the MoveCleanup phase), not at the first JobEnd.
+  - Site creation uses `SPSiteManager`.
 
 ### Tests
 - Unit tests: `test/unit/*.test.ts` (`npm test`). Do not call SharePoint in unit tests.
