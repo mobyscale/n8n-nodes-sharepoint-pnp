@@ -6,6 +6,9 @@ export interface FieldFormValue {
 export interface FieldInfo {
 	InternalName: string;
 	TypeAsString: string;
+	TermSetId?: string;
+	SspId?: string;
+	AnchorId?: string;
 }
 
 const MULTI_VALUE_TYPES = new Set([
