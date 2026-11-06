@@ -19,7 +19,7 @@ import {
 	type Term,
 } from '../../nodes/SharePointPnp/resources/taxonomy/service';
 
-const ID = '3f63e228-1d35-4499-863d-f2afb5035f82';
+const ID = '12345678-1234-1234-1234-123456789abc';
 
 describe('csom values', () => {
 	it('reads guids and dates', () => {
