@@ -11,6 +11,7 @@ import type {
 import { inject } from 'vitest';
 
 import { SharePointPnpCertificateApi } from '../../credentials/SharePointPnpCertificateApi.credentials';
+import { undefinedIfNotFound } from '../../nodes/SharePointPnp/shared/filesFolders';
 import { joinPath, toServerRelativePath } from '../../nodes/SharePointPnp/shared/utils';
 import { SharePointPnp } from '../../nodes/SharePointPnp/SharePointPnp.node';
 import { createSp } from '../../nodes/SharePointPnp/transport';
@@ -165,7 +166,50 @@ export async function createTestFolder(): Promise<string> {
 	return path;
 }
 
+const TEST_FOLDER_PATTERN = /\/__pnp-test-(\d+)$/;
+
+/**
+ * Permanently deletes the recycle bin items of one test run: the test folder itself and every item
+ * that was under it. Some operations (for example a Copy Job move) recycle items as a side effect.
+ * Only items deleted after the test folder was created are considered.
+ */
+export async function purgeTestRecycleBinItems(path: string): Promise<void> {
+	const match = path.match(TEST_FOLDER_PATTERN);
+	if (!match) return;
+	const folder = path.replace(/^\/+/, '');
+	const createdAt = new Date(Number(match[1]) - 60_000).toISOString();
+
+	const items = await runNode({
+		resource: 'recycleBin',
+		operation: 'getAll',
+		scope: 'siteCollection',
+		returnAll: true,
+		filters: { deletedAfter: createdAt, text: '__pnp-test-' },
+	});
+	const ids = items
+		.map((item) => item.json)
+		.filter((item) => {
+			const dirName = String(item.dirName ?? '').replace(/^\/+/, '');
+			return (
+				`${dirName}/${String(item.leafName ?? '')}` === folder ||
+				dirName === folder ||
+				dirName.startsWith(`${folder}/`)
+			);
+		})
+		.map((item) => String(item.id));
+
+	if (ids.length) {
+		await runNode({
+			resource: 'recycleBin',
+			operation: 'deletePermanently',
+			scope: 'siteCollection',
+			ids: ids.join(','),
+		});
+	}
+}
+
 export async function removeTestFolder(path: string | undefined): Promise<void> {
-	if (!path || !path.includes('/__pnp-test-')) return;
-	await createTestSp().web.getFolderByServerRelativePath(path).delete();
+	if (!path || !TEST_FOLDER_PATTERN.test(path)) return;
+	await undefinedIfNotFound(createTestSp().web.getFolderByServerRelativePath(path).delete());
+	await purgeTestRecycleBinItems(path);
 }

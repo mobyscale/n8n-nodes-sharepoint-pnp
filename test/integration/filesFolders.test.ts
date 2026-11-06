@@ -11,6 +11,7 @@ import {
 	createTestSp,
 	hasConfig,
 	locator,
+	purgeTestRecycleBinItems,
 } from './harness';
 
 function toBinaryItem(buffer: Buffer, fileName: string): INodeExecutionData {
@@ -66,6 +67,7 @@ async function cleanUp(testFolder: string | undefined, ids: string[]): Promise<v
 		await ignoreMissing(sp.web.recycleBin.getById(id).delete());
 		await ignoreMissing(sp.site.recycleBin.getById(id).delete());
 	}
+	await purgeTestRecycleBinItems(testFolder);
 }
 
 describe.runIf(hasConfig)('files and folders', () => {
