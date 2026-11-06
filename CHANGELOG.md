@@ -13,3 +13,4 @@
 - Property selection for older resources: File Get and Get Versions, Folder Get, File/Folder Get Many, List Get, Get Many, Get Fields and Get Views, Permission Get Many, Group Get, Get Many and Get Members, User Get and Get Many, and Recycle Bin Get Many now have Additional Properties, Return All Properties and (where it applies) Expand. The default properties are the ones the output had before. Include List Item Fields still works.
 - Permission Add, Remove and Set have an Input Mode (Fields or JSON). In JSON mode, Role Assignments (JSON) takes many principals and roles in one array.
 - New File operations: Publish, Unpublish, Approve and Deny, each with a comment.
+- Taxonomy resource (managed metadata) through the SharePoint CSOM endpoint: term groups, term sets, terms, search by label, and create, update and delete term. List Item Create and Update accept term labels, term IDs or "Label|ID" for managed metadata fields, with the option "Create Missing Terms".

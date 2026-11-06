@@ -24,6 +24,11 @@ import {
 	type FieldFormValue,
 	type FieldInfo,
 } from './helpers';
+import {
+	createTagClient,
+	hasTaxonomyValues,
+	resolveTaxonomyValues,
+} from './taxonomy';
 
 const RESOURCE = 'listItem';
 const NEEDS_TARGET = ['get', 'update', 'delete'];
@@ -326,6 +331,14 @@ const description: INodeProperties[] = [
 					'Whether to create a folder instead of an item. Set the folder name with the field FileLeafRef. A document library cannot create files here, only folders',
 			},
 			{
+				displayName: 'Create Missing Terms',
+				name: 'createMissingTerms',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to create a term when a managed metadata (tag) value is a label that does not exist in the term set of the field. The term set must be open for new terms. If off, an unknown label fails.',
+			},
+			{
 				displayName: 'Folder Path',
 				name: 'folderPath',
 				type: 'string',
@@ -349,7 +362,15 @@ const description: INodeProperties[] = [
 				name: 'appendToMultiValue',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to add the new values to the current values of multi-choice and multi-lookup fields instead of replacing them. Other field types are replaced.',
+				description: 'Whether to add the new values to the current values of multi-choice, multi-lookup and multi-value managed metadata (tag) fields instead of replacing them. Other field types are replaced.',
+			},
+			{
+				displayName: 'Create Missing Terms',
+				name: 'createMissingTerms',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to create a term when a managed metadata (tag) value is a label that does not exist in the term set of the field. The term set must be open for new terms. If off, an unknown label fails.',
 			},
 			{
 				displayName: 'System Update',
@@ -381,7 +402,13 @@ const description: INodeProperties[] = [
 ];
 
 async function getFieldInfos(list: IList): Promise<FieldInfo[]> {
-	return (await list.fields.select('InternalName', 'TypeAsString')()) as FieldInfo[];
+	return (await list.fields.select(
+		'InternalName',
+		'TypeAsString',
+		'TermSetId',
+		'SspId',
+		'AnchorId',
+	)()) as FieldInfo[];
 }
 
 async function resolveItemByPath(sp: SPFI, path: string): Promise<{ list: IList; itemId: number }> {
@@ -477,14 +504,37 @@ function assertNoFieldErrors(
 	}
 }
 
+async function resolveTags(
+	this: IExecuteFunctions,
+	siteUrl: string,
+	values: Record<string, unknown>,
+	fieldInfos: FieldInfo[],
+	createMissing: boolean,
+	current?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+	if (!hasTaxonomyValues(values, fieldInfos)) return values;
+	return await resolveTaxonomyValues(values, fieldInfos, createTagClient(this, siteUrl), {
+		createMissing,
+		current,
+	});
+}
+
 async function create(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const list = getList.call(this, sp, itemIndex);
 	const options = this.getNodeParameter('createOptions', itemIndex, {}) as {
 		asFolder?: boolean;
 		folderPath?: string;
+		createMissingTerms?: boolean;
 	};
-	const values = readFieldValues.call(this, itemIndex, 'create');
-	const formValues = buildFormValues(values, await getFieldInfos(list));
+	const fieldInfos = await getFieldInfos(list);
+	const values = await resolveTags.call(
+		this,
+		siteUrl,
+		readFieldValues.call(this, itemIndex, 'create'),
+		fieldInfos,
+		options.createMissingTerms === true,
+	);
+	const formValues = buildFormValues(values, fieldInfos);
 
 	const rootFolder = await list.rootFolder.select('ServerRelativeUrl')();
 	const folderPath = options.folderPath?.trim()
@@ -629,6 +679,25 @@ async function getMultiValueCurrent(
 	);
 }
 
+/** Reads the current tags of multi-value managed metadata fields, for "Append to Multi-Value Fields". */
+async function getTagCurrent(
+	list: IList,
+	itemId: number,
+	names: string[],
+	types: Map<string, string>,
+): Promise<Record<string, unknown> | undefined> {
+	const tagFields = names.filter((name) => types.get(name) === 'TaxonomyFieldTypeMulti');
+	if (!tagFields.length) return undefined;
+	const current = (await list.items.getById(itemId).select(...tagFields)()) as Record<string, unknown>;
+	return Object.fromEntries(
+		tagFields.map((name) => {
+			const value = current[name];
+			const results = (value as { results?: unknown } | null)?.results;
+			return [name, Array.isArray(results) ? results : value];
+		}),
+	);
+}
+
 /**
  * validateUpdateListItem always sets Modified and Editor. A system update sends the current values
  * back, so they do not change. SharePoint reads the date in the time zone of the site, and a user
@@ -667,6 +736,7 @@ async function update(this: IExecuteFunctions, context: OperationContext) {
 	const options = this.getNodeParameter('updateOptions', itemIndex, {}) as {
 		systemUpdate?: boolean;
 		appendToMultiValue?: boolean;
+		createMissingTerms?: boolean;
 	};
 	let values = readFieldValues.call(this, itemIndex, 'update');
 	const fieldInfos = await getFieldInfos(list);
@@ -682,6 +752,19 @@ async function update(this: IExecuteFunctions, context: OperationContext) {
 			for (const name of appendable) values[name] = mergeMultiValues(current[name], values[name]);
 		}
 	}
+
+	const fieldTypes = new Map(fieldInfos.map((field) => [field.InternalName, field.TypeAsString]));
+	const currentTags = options.appendToMultiValue
+		? await getTagCurrent(list, itemId, Object.keys(values), fieldTypes)
+		: undefined;
+	values = await resolveTags.call(
+		this,
+		context.siteUrl,
+		values,
+		fieldInfos,
+		options.createMissingTerms === true,
+		currentTags,
+	);
 
 	const formValues: FieldFormValue[] = buildFormValues(values, fieldInfos);
 	if (!formValues.length) {
