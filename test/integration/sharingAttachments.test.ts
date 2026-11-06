@@ -95,7 +95,7 @@ describe.runIf(hasConfig)('sharing', () => {
 			operation: 'shareWithUsers',
 			...fileTarget(),
 			users: 'user@contoso.com',
-			role: 'view',
+			shareRole: 'view',
 			sendEmail: false,
 		});
 	});

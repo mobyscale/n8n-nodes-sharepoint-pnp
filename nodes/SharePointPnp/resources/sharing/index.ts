@@ -181,7 +181,7 @@ const description: INodeProperties[] = [
 	},
 	{
 		displayName: 'Role',
-		name: 'role',
+		name: 'shareRole',
 		type: 'options',
 		default: 'view',
 		options: [
@@ -408,7 +408,7 @@ async function shareWithUsers(
 	if (!users.length) {
 		throw new NodeOperationError(this.getNode(), 'Add at least one user', { itemIndex });
 	}
-	const role = toSharingRole(this.getNodeParameter('role', itemIndex) as ShareRole);
+	const role = toSharingRole(this.getNodeParameter('shareRole', itemIndex) as ShareRole);
 	const sendEmail = this.getNodeParameter('sendEmail', itemIndex, false) as boolean;
 	const options = this.getNodeParameter('shareOptions', itemIndex, {}) as {
 		propagateAcl?: boolean;
@@ -445,7 +445,7 @@ async function shareWithUsers(
 	throwOnFailure(this, result, itemIndex);
 	return {
 		...describeTarget(target),
-		role: this.getNodeParameter('role', itemIndex) as string,
+		role: this.getNodeParameter('shareRole', itemIndex) as string,
 		emailSent: sendEmail,
 		statusCode: result.StatusCode,
 		users: (result.UniquelyPermissionedUsers ?? []) as unknown as IDataObject[],

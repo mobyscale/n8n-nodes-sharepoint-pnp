@@ -430,7 +430,7 @@ const description: INodeProperties[] = [
 
 	{
 		displayName: 'Folder Path',
-		name: 'folderPath',
+		name: 'defaultsFolderPath',
 		type: 'string',
 		default: '',
 		required: true,
@@ -747,7 +747,7 @@ async function setDefaultColumnValues(
 ) {
 	// PnPjs list methods keep query state, so each call needs a new instance.
 	const list = () => getList.call(this, sp, itemIndex);
-	const folderPath = getPath.call(this, siteUrl, itemIndex, 'folderPath');
+	const folderPath = getPath.call(this, siteUrl, itemIndex, 'defaultsFolderPath');
 	const collection = this.getNodeParameter('defaultValues', itemIndex, {}) as {
 		values?: Array<{ name: string; value: string }>;
 	};

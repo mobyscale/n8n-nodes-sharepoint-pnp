@@ -261,7 +261,7 @@ describe.runIf(hasConfig)('list items', () => {
 			resource: 'list',
 			operation: 'setDefaultColumnValues',
 			...listParams(),
-			folderPath: testFolder,
+			defaultsFolderPath: testFolder,
 			defaultValues: { values: [{ name: 'Title', value: 'Example' }] },
 		});
 	});
