@@ -24,7 +24,9 @@ import {
 	type RoleAssignmentWithBindings,
 	type TargetDescriptor,
 } from '../../shared/securables';
+import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import type { OperationContext, ResourceModule } from '../types';
+import { toAssignmentOutput } from './helpers';
 
 const RESOURCE = 'permission';
 const show = (operations: string[], extra: IDataObject = {}) => ({
@@ -41,6 +43,8 @@ const ASSIGNMENT_SELECT = [
 	'RoleDefinitionBindings/Id',
 	'RoleDefinitionBindings/Name',
 ];
+
+const ASSIGNMENT_EXPAND = ['Member', 'RoleDefinitionBindings'];
 
 const description: INodeProperties[] = [
 	{
@@ -128,6 +132,22 @@ const description: INodeProperties[] = [
 				description: 'Whether to copy the role assignments of the parent to the target',
 			},
 		],
+	},
+	{
+		displayName: 'Options',
+		name: 'getAllOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['getAll']),
+		options: selectionOptions(ASSIGNMENT_SELECT).map((option) =>
+			option.name === 'additionalProperties'
+				? {
+						...option,
+						description: `${option.description} The result keeps the default output and adds the SharePoint object in "properties".`,
+					}
+				: option,
+		),
 	},
 	...principalProperties(RESOURCE, ['add', 'remove']),
 	{ ...roleRLC, displayOptions: show(['add']) },
@@ -231,10 +251,14 @@ function describeTarget(target: TargetDescriptor): IDataObject {
 
 async function getAssignments(
 	securable: SecurableQueryable,
+	options: SelectionValues = {},
 ): Promise<RoleAssignmentWithBindings[]> {
-	return (await securable.roleAssignments
-		.select(...ASSIGNMENT_SELECT)
-		.expand('Member', 'RoleDefinitionBindings')()) as unknown as RoleAssignmentWithBindings[];
+	return (await applySelection(
+		securable.roleAssignments,
+		ASSIGNMENT_SELECT,
+		options,
+		ASSIGNMENT_EXPAND,
+	)()) as unknown as RoleAssignmentWithBindings[];
 }
 
 function requireUnique(
@@ -254,31 +278,12 @@ function requireUnique(
 
 async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const securable = buildSecurable(sp, readTarget.call(this, siteUrl, itemIndex));
+	const options = this.getNodeParameter('getAllOptions', itemIndex, {}) as SelectionValues;
 	const [unique, assignments] = await Promise.all([
 		hasUniqueRoleAssignments(securable),
-		getAssignments(securable),
+		getAssignments(securable, options),
 	]);
-	return assignments.map((assignment) => {
-		const { Member, RoleDefinitionBindings, PrincipalId } =
-			assignment as RoleAssignmentWithBindings & {
-				Member?: IDataObject;
-			};
-		return {
-			hasUniqueRoleAssignments: unique,
-			principalId: PrincipalId,
-			member: {
-				id: Member?.Id,
-				title: Member?.Title,
-				loginName: Member?.LoginName,
-				principalType: Member?.PrincipalType,
-				email: Member?.Email,
-			},
-			roleDefinitions: (RoleDefinitionBindings ?? []).map((role) => ({
-				id: role.Id,
-				name: (role as { Name?: string }).Name,
-			})),
-		} as IDataObject;
-	});
+	return assignments.map((assignment) => toAssignmentOutput(assignment, unique, options));
 }
 
 async function breakInheritance(
