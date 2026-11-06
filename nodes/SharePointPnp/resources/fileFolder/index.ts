@@ -2,6 +2,7 @@ import type { IDataObject, IExecuteFunctions, INodeProperties } from 'n8n-workfl
 import { NodeOperationError } from 'n8n-workflow';
 import type { SPFI } from '@pnp/sp/index.js';
 
+import { getCopyJobStatus, getJobInfoParameter } from '../../shared/copyJob';
 import { getPath, pathRLC } from '../../shared/descriptions';
 import {
 	buildViewXml,
@@ -31,6 +32,12 @@ const description: INodeProperties[] = [
 				value: 'checkExists',
 				description: 'Check if files or folders exist',
 				action: 'Check if files or folders exist',
+			},
+			{
+				name: 'Get Copy Job Status',
+				value: 'getCopyJobStatus',
+				description: 'Get the progress of a copy or move job that is running in SharePoint',
+				action: 'Get the status of a copy job',
 			},
 			{
 				name: 'Get Many',
@@ -136,6 +143,16 @@ const description: INodeProperties[] = [
 				description: 'Whether to add all list item fields of each entry in "fields"',
 			},
 		],
+	},
+	{
+		displayName: 'Job Info',
+		name: 'jobInfo',
+		type: 'json',
+		required: true,
+		default: '={{ $json }}',
+		description:
+			'The job info that a Copy Job copy or move returned. An object with "jobId", "jobQueueUri" and "encryptionKey". By default, the fields of the input item are used. SharePoint returns each job log entry once, so the summary and the messages show only the entries that are new since the last check.',
+		displayOptions: show(['getCopyJobStatus']),
 	},
 	{
 		displayName: 'Paths',
@@ -317,12 +334,29 @@ async function checkExists(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: 
 	}));
 }
 
+async function getCopyJobStatusOperation(
+	this: IExecuteFunctions,
+	{ sp, siteUrl, itemIndex }: OperationContext,
+) {
+	const { sourcePath, destinationPath, ...info } = getJobInfoParameter.call(this, itemIndex);
+	const status = await getCopyJobStatus(sp, siteUrl, {
+		jobId: info.jobId,
+		jobQueueUri: info.jobQueueUri,
+		encryptionKey: info.encryptionKey,
+	});
+	return {
+		...status,
+		...(sourcePath ? { sourcePath } : {}),
+		...(destinationPath ? { destinationPath } : {}),
+	};
+}
+
 export const fileFolderResource: ResourceModule = {
 	option: {
 		name: 'File/Folder',
 		value: 'fileFolder',
-		description: 'Find files and folders, and check if paths exist',
+		description: 'Find files and folders, check if paths exist, and check copy jobs',
 	},
 	description,
-	operations: { getAll, checkExists },
+	operations: { getAll, checkExists, getCopyJobStatus: getCopyJobStatusOperation },
 };

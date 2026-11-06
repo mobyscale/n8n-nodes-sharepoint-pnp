@@ -3,15 +3,12 @@ import { NodeOperationError } from 'n8n-workflow';
 import type { SPFI } from '@pnp/sp/index.js';
 
 import { getPath, pathRLC } from '../../shared/descriptions';
+import { copyJobProperties, methodProperty, runMoveCopyJob } from '../../shared/copyJob';
 import {
-	buildCopyJobPayload,
 	buildMoveCopyOptions,
 	getAncestorPaths,
 	getDestinationPath,
 	getMissingSegments,
-	runCopyJob,
-	toAbsoluteUrl,
-	type IfExists,
 	undefinedIfNotFound,
 	type MoveCopyFields,
 } from '../../shared/filesFolders';
@@ -30,12 +27,12 @@ const includeFieldsOption: INodeProperties = {
 
 function moveCopyOptions(kind: 'move' | 'copy'): INodeProperties {
 	return {
-		displayName: 'Options',
+		displayName: 'Direct Options',
 		name: 'options',
 		type: 'collection',
 		placeholder: 'Add Option',
 		default: {},
-		displayOptions: show([kind]),
+		displayOptions: { show: { resource: ['folder'], operation: [kind], method: ['direct'] } },
 		options: [
 			{
 				displayName: 'Bypass Shared Lock',
@@ -51,7 +48,7 @@ function moveCopyOptions(kind: 'move' | 'copy'): INodeProperties {
 				type: 'options',
 				default: 'fail',
 				description:
-					'What to do when a folder with the same name exists in the destination. "Replace" works only with the Copy Job method.',
+					'What to do when a folder with the same name exists in the destination. The Direct method cannot replace a folder. Use the Copy Job method for that.',
 				options: [
 					{ name: 'Fail', value: 'fail' },
 					{ name: 'Replace', value: 'replace' },
@@ -143,62 +140,11 @@ const description: INodeProperties[] = [
 		}),
 		displayOptions: show(['copy', 'move']),
 	},
-	{
-		displayName: 'Method',
-		name: 'method',
-		type: 'options',
-		default: 'direct',
-		description: 'How SharePoint copies or moves the folder',
-		displayOptions: show(['copy', 'move']),
-		options: [
-			{
-				name: 'Direct',
-				value: 'direct',
-				description: 'Run the operation in one request. Best for small folders.',
-			},
-			{
-				name: 'Copy Job',
-				value: 'copyJob',
-				description: 'Use the asynchronous migration API. Best for large folders.',
-			},
-		],
-	},
+	methodProperty('folder'),
 	moveCopyOptions('copy'),
 	moveCopyOptions('move'),
-	{
-		displayName: 'Copy Job Options',
-		name: 'copyJobOptions',
-		type: 'collection',
-		placeholder: 'Add Option',
-		default: {},
-		displayOptions: {
-			show: { resource: ['folder'], operation: ['copy', 'move'], method: ['copyJob'] },
-		},
-		options: [
-			{
-				displayName: 'Ignore Version History',
-				name: 'ignoreVersionHistory',
-				type: 'boolean',
-				default: false,
-				description: 'Whether to copy only the current version of each file',
-			},
-			{
-				displayName: 'Max Wait (Seconds)',
-				name: 'maxWaitSeconds',
-				type: 'number',
-				typeOptions: { minValue: 1 },
-				default: 300,
-				description: 'How long to wait for the job to finish',
-			},
-			{
-				displayName: 'Wait for Completion',
-				name: 'waitForCompletion',
-				type: 'boolean',
-				default: true,
-				description: 'Whether to wait until the copy job is finished',
-			},
-		],
-	},
+	...copyJobProperties('folder', 'copy'),
+	...copyJobProperties('folder', 'move'),
 	{
 		displayName: 'New Name',
 		name: 'newName',
@@ -291,44 +237,21 @@ function moveCopy(kind: 'move' | 'copy') {
 	return async function (this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 		const sourcePath = getPath.call(this, siteUrl, itemIndex, 'folderPath');
 		const destinationFolder = getPath.call(this, siteUrl, itemIndex, 'destinationFolder');
-		const method = this.getNodeParameter('method', itemIndex) as string;
+		const method = this.getNodeParameter('method', itemIndex, 'copyJob') as string;
+		if (method === 'copyJob') {
+			return await runMoveCopyJob.call(
+				this,
+				{ sp, siteUrl, itemIndex },
+				{
+					resource: 'folder',
+					kind,
+					sourcePath,
+					destinationFolder,
+				},
+			);
+		}
 		const fields = this.getNodeParameter('options', itemIndex, {}) as MoveCopyFields;
 		const destinationPath = getDestinationPath(sourcePath, destinationFolder, fields.newName);
-
-		if (method === 'copyJob') {
-			const jobOptions = this.getNodeParameter('copyJobOptions', itemIndex, {}) as {
-				ignoreVersionHistory?: boolean;
-				maxWaitSeconds?: number;
-				waitForCompletion?: boolean;
-			};
-			const payload = buildCopyJobPayload({
-				sourceUrl: toAbsoluteUrl(siteUrl, sourcePath),
-				destinationFolderUrl: toAbsoluteUrl(siteUrl, destinationFolder),
-				move: kind === 'move',
-				ifExists: (fields.ifExists ?? 'fail') as IfExists,
-				bypassSharedLock: fields.bypassSharedLock ?? false,
-				ignoreVersionHistory: jobOptions.ignoreVersionHistory ?? false,
-				newName: fields.newName?.trim() || undefined,
-			});
-			const result = await runCopyJob(
-				this.getNode(),
-				sp,
-				siteUrl,
-				payload,
-				jobOptions.waitForCompletion ?? true,
-				jobOptions.maxWaitSeconds ?? 300,
-				itemIndex,
-			);
-			if (result.errors.length) {
-				throw new NodeOperationError(
-					this.getNode(),
-					`The copy job ${result.jobId} failed: ${JSON.stringify(result.errors)}`,
-					{ itemIndex },
-				);
-			}
-			const base = { sourcePath, destinationPath, method, ...result };
-			return result.completed ? await readResult(sp, destinationPath, base) : base;
-		}
 
 		if (fields.ifExists === 'replace') {
 			throw new NodeOperationError(
