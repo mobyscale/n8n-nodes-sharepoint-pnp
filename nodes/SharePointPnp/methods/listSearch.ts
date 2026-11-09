@@ -5,6 +5,7 @@ import type {
 } from 'n8n-workflow';
 
 import { getSiteUrl } from '../shared/descriptions';
+import { pageByOffset, sortAndCap, sortByName } from '../shared/paging';
 import { getSiteServerRelativeUrl, joinPath, splitPath } from '../shared/utils';
 import { createSp, getTenantUrl } from '../transport';
 
@@ -65,14 +66,15 @@ async function searchListsByTemplate(
 
 	const tenantUrl = new URL(siteUrl).origin;
 	return {
-		results: lists
-			.filter((list) => matches(list.Title, filter))
-			.sort((a, b) => a.Title.localeCompare(b.Title))
-			.map((list) => ({
-				name: list.Title,
-				value: list.Id,
-				url: `${tenantUrl}${(list as { RootFolder?: { ServerRelativeUrl?: string } }).RootFolder?.ServerRelativeUrl ?? ''}`,
-			})),
+		results: sortAndCap(
+			lists
+				.filter((list) => matches(list.Title, filter))
+				.map((list) => ({
+					name: list.Title,
+					value: list.Id,
+					url: `${tenantUrl}${(list as { RootFolder?: { ServerRelativeUrl?: string } }).RootFolder?.ServerRelativeUrl ?? ''}`,
+				})),
+		),
 	};
 }
 
@@ -93,10 +95,12 @@ export async function searchLibraries(
 /**
  * Treats the search text as a site-relative path. Without a "/", it lists the document libraries.
  * With a "/", it lists the subfolders of the parent path whose names start with the last segment.
+ * Both lists are sorted A-Z and page by offset.
  */
 export async function searchFolders(
 	this: ILoadOptionsFunctions,
 	filter?: string,
+	paginationToken?: string,
 ): Promise<INodeListSearchResult> {
 	const siteUrl = await getSiteUrl(this);
 	const sp = createSp(this, siteUrl);
@@ -109,20 +113,19 @@ export async function searchFolders(
 			.select('Title', 'RootFolder/ServerRelativeUrl', 'RootFolder/Name')
 			.expand('RootFolder')
 			.filter(`Hidden eq false and BaseTemplate eq ${DOCUMENT_LIBRARY_TEMPLATE}`)();
-		return {
-			results: libraries
-				.map((library) => {
-					const root = (library as { RootFolder: { ServerRelativeUrl: string; Name: string } })
-						.RootFolder;
-					return { title: library.Title, url: root.ServerRelativeUrl, name: root.Name };
-				})
-				.filter((library) => matches(library.name, text) || matches(library.title, text))
-				.map((library) => ({
-					name: `${library.name}/`,
-					value: library.url,
-					url: `${tenantUrl}${library.url}`,
-				})),
-		};
+		const entries = libraries
+			.map((library) => {
+				const root = (library as { RootFolder: { ServerRelativeUrl: string; Name: string } })
+					.RootFolder;
+				return { title: library.Title, url: root.ServerRelativeUrl, name: root.Name };
+			})
+			.filter((library) => matches(library.name, text) || matches(library.title, text))
+			.map((library) => ({
+				name: `${library.name}/`,
+				value: library.url,
+				url: `${tenantUrl}${library.url}`,
+			}));
+		return pageByOffset(sortByName(entries), paginationToken);
 	}
 
 	const { parent, name } = splitPath(text);
@@ -131,17 +134,16 @@ export async function searchFolders(
 		.getFolderByServerRelativePath(parentPath)
 		.folders.select('Name', 'ServerRelativeUrl')();
 
-	return {
-		results: folders
-			.filter(
-				(folder) =>
-					folder.Name !== 'Forms' && folder.Name.toLowerCase().startsWith(name.toLowerCase()),
-			)
-			.sort((a, b) => a.Name.localeCompare(b.Name))
-			.map((folder) => ({
-				name: `${parent}/${folder.Name}/`,
-				value: folder.ServerRelativeUrl,
-				url: `${tenantUrl}${folder.ServerRelativeUrl}`,
-			})),
-	};
+	const entries = folders
+		.filter(
+			(folder) =>
+				folder.Name !== 'Forms' && folder.Name.toLowerCase().startsWith(name.toLowerCase()),
+		)
+		.sort((a, b) => a.Name.localeCompare(b.Name))
+		.map((folder) => ({
+			name: `${parent}/${folder.Name}/`,
+			value: folder.ServerRelativeUrl,
+			url: `${tenantUrl}${folder.ServerRelativeUrl}`,
+		}));
+	return pageByOffset(entries, paginationToken);
 }
