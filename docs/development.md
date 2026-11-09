@@ -24,7 +24,7 @@ Test safety rules:
 - Tests only touch content that they create. Each run creates a folder named `__pnp-test-<timestamp>` in the test library and deletes it at the end.
 - Tests never read, copy, move, change or delete content that they did not create.
 - Tests never change existing site content, site groups or site-level permissions.
-- Tests that create lists or libraries, and tests for site settings, property bag, site creation, hub sites, fields, content types, list settings and term store writes, are skipped by design. Only read tests run for these areas.
+- Tests that create lists or libraries, and tests for site settings, property bag, site creation, hub sites, fields, content types, list settings and term store writes, are write tests. They run only when `SP_RUN_WRITE_TESTS=true` is in `.env`. Use that only on a site that you can change and reset, never on a production site. Some write tests use placeholder names or IDs that you must change for your site first. Without the setting, they are skipped and only read tests run for these areas.
 
 For manual tests, see the [manual test checklist](manual-test-checklist.md).
 

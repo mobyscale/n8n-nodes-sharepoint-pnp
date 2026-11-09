@@ -102,9 +102,10 @@ node (`nodes.md`, `properties.md`, `nodes-programmatic.md`) or a credential (`cr
     clean them up. Never read, copy, move, change or delete an existing file or folder that the test did not
     create. The test library is only the container for the test folder.
   - Never change existing site content, site groups, or site-level permissions.
-  - Tests that create lists or document libraries use `it.skip`. They are hard to delete.
-  - Site-level and schema changes (site settings, property bag, site creation, hub sites, fields, content types,
-    list settings, term store writes) never run. Only read tests run. Write tests use `it.skip`.
+  - Tests that create lists or document libraries, and site-level and schema changes (site settings, property bag,
+    site creation, hub sites, fields, content types, list settings, term store writes) use `itWrite` from the
+    harness. They run only with `SP_RUN_WRITE_TESTS=true`, which is for a site that can be changed and reset, never
+    the production site. Without it they are skipped, so only read tests run for these areas.
 
 ## Rules for public content
 
