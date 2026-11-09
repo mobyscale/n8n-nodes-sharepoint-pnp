@@ -15,7 +15,7 @@ export class SharePointPnpCertificateApi implements ICredentialType {
 
 	displayName = 'SharePoint PnP Certificate API';
 
-	icon: Icon = { light: 'file:icons/sharepoint.svg', dark: 'file:icons/sharepoint.svg' };
+	icon: Icon = { light: 'file:icons/sharepoint-pnp.svg', dark: 'file:icons/sharepoint-pnp.svg' };
 
 	documentationUrl =
 		'https://github.com/octanesoftware/n8n-nodes-sharepoint-pnp#certificate-app-only';

@@ -59,7 +59,7 @@ export class SharePointPnpWebhookTrigger implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'SharePoint PnP Webhook Trigger',
 		name: 'sharePointPnpWebhookTrigger',
-		icon: { light: 'file:sharepoint.svg', dark: 'file:sharepoint.svg' },
+		icon: { light: 'file:sharepoint-pnp.svg', dark: 'file:sharepoint-pnp.svg' },
 		group: ['trigger'],
 		version: 1,
 		subtitle: '={{$parameter["events"].join(", ")}}',
