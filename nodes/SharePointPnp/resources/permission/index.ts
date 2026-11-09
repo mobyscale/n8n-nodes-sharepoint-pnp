@@ -1,7 +1,6 @@
 import type { IDataObject, IExecuteFunctions, INodeProperties } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 import type { SPFI } from '@pnp/sp/index.js';
-import type { SecurableQueryable } from '@pnp/sp/security/index.js';
 
 import {
 	buildSecurable,
@@ -15,19 +14,27 @@ import {
 	hasUniqueRoleAssignments,
 	parsePrincipalOrThrow,
 	principalProperties,
+	principalRLC,
+	readPrincipalInput,
 	readTarget,
 	resolvePrincipalReference,
 	resolveRoleId,
 	roleRLC,
 	targetProperties,
 	toLoginName,
+	userRLC,
 	type RoleAssignmentEntry,
-	type RoleAssignmentWithBindings,
 	type TargetDescriptor,
 } from '../../shared/securables';
-import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
+import { toNodeError } from '../../shared/utils';
+import { selectionOptions, type SelectionValues } from '../../shared/selection';
 import type { OperationContext, ResourceModule } from '../types';
-import { toAssignmentOutput } from './helpers';
+import {
+	applyAssignmentChanges,
+	ASSIGNMENT_SELECT,
+	getAssignments,
+	toAssignmentOutput,
+} from './helpers';
 import {
 	mergeByPrincipal,
 	parseRoleAssignmentsJson,
@@ -35,22 +42,22 @@ import {
 	type ResolvedAssignment,
 	type RoleAssignmentInput,
 } from './json';
+import { locatorValue } from '../../shared/pickers';
+import { getPath } from '../../shared/descriptions';
+import {
+	applyPermissionMapping,
+	createMappingGateway,
+	parseMappingsJson,
+	type MappingInput,
+	type MappingOptions,
+	type MappingResult,
+} from './mapping';
+import { mappingProperties } from './mappingDescription';
 
 const RESOURCE = 'permission';
 const show = (operations: string[], extra: IDataObject = {}) => ({
 	show: { resource: [RESOURCE], operation: operations, ...extra },
 });
-
-const ASSIGNMENT_SELECT = [
-	'PrincipalId',
-	'Member/Id',
-	'Member/Title',
-	'Member/LoginName',
-	'Member/PrincipalType',
-	'Member/Email',
-	'RoleDefinitionBindings/Id',
-	'RoleDefinitionBindings/Name',
-];
 
 const ROLE_OPERATIONS = ['add', 'remove', 'set'];
 
@@ -62,8 +69,6 @@ const inFieldsMode = (property: INodeProperties): INodeProperties => ({
 		show: { ...property.displayOptions?.show, inputMode: ['fields'] },
 	},
 });
-
-const ASSIGNMENT_EXPAND = ['Member', 'RoleDefinitionBindings'];
 
 const description: INodeProperties[] = [
 	{
@@ -78,6 +83,13 @@ const description: INodeProperties[] = [
 				value: 'add',
 				description: 'Give a group or user a role on a target',
 				action: 'Add a role assignment',
+			},
+			{
+				name: 'Apply Mapping',
+				value: 'applyMapping',
+				description:
+					'Apply a map of paths, principals and roles to many folders below a base folder',
+				action: 'Apply a permission mapping',
 			},
 			{
 				name: 'Break Inheritance',
@@ -182,7 +194,7 @@ const description: INodeProperties[] = [
 				description: 'Give a list of principals and roles as JSON, to change many at once',
 			},
 		],
-		displayOptions: show(ROLE_OPERATIONS),
+		displayOptions: show([...ROLE_OPERATIONS, 'applyMapping']),
 	},
 	{
 		displayName: 'Role Assignments (JSON)',
@@ -190,10 +202,8 @@ const description: INodeProperties[] = [
 		type: 'json',
 		required: true,
 		default: '[]',
-		placeholder:
-			'[{ "principal": "Example Members", "role": "Edit" }, { "principal": "user@contoso.com", "roles": ["Read", "Contribute"] }]',
 		description:
-			'An array of objects. "principal" is a group name, a group or user ID, or the email address or login name of a user. "principalType" ("user" or "group") is optional. Use it when the name is not clear. "role" is one role name or ID, "roles" is a list of them. For Remove, an entry without a role removes all roles of the principal.',
+			'An array of objects with "principal" and "role" (or "roles"). "principalType" is optional. See the documentation for an example.',
 		displayOptions: show(ROLE_OPERATIONS, { inputMode: ['json'] }),
 	},
 	...principalProperties(RESOURCE, ['add', 'remove']).map(inFieldsMode),
@@ -221,6 +231,22 @@ const description: INodeProperties[] = [
 				description:
 					'Whether to break inheritance first (and copy the current role assignments) if the target inherits permissions',
 			},
+			{
+				displayName: 'Clear Subscopes',
+				name: 'clearSubscopes',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to remove unique permissions of child objects when this operation breaks inheritance',
+			},
+			{
+				displayName: 'Skip Unresolved Principals',
+				name: 'skipUnresolved',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to skip an entry whose principal or role cannot be found, and report it in "warnings", instead of failing the operation',
+			},
 		],
 	},
 	inFieldsMode({
@@ -237,22 +263,12 @@ const description: INodeProperties[] = [
 				displayName: 'Entries',
 				name: 'entries',
 				values: [
+					{ ...principalRLC, required: false },
 					{
-						displayName: 'Principal',
-						name: 'principal',
-						type: 'string',
-						default: '',
-						placeholder: 'Example Members or user@contoso.com',
-						description:
-							'A group name, a group or user ID, or the email address or login name of a user',
-					},
-					{
-						displayName: 'Role',
-						name: 'role',
-						type: 'string',
-						default: '',
-						placeholder: 'Contribute',
-						description: 'The name or ID of a role',
+						...roleRLC,
+						required: false,
+						description: 'A permission level of the site',
+						typeOptions: { loadOptionsDependsOn: ['site.value'] },
 					},
 				],
 			},
@@ -274,18 +290,38 @@ const description: INodeProperties[] = [
 				description:
 					'Whether to copy the current role assignments when this operation has to break inheritance first',
 			},
+			{
+				displayName: 'Always Break Inheritance',
+				name: 'alwaysBreakInheritance',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to call break inheritance again when the target already has unique permissions. SharePoint can keep the existing assignments in that case, so the operation still adds and removes entries to match the list.',
+			},
+			{
+				displayName: 'Clear Subscopes',
+				name: 'clearSubscopes',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to remove unique permissions of child objects when this operation breaks inheritance',
+			},
+			{
+				displayName: 'Skip Unresolved Principals',
+				name: 'skipUnresolved',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to skip an entry whose principal or role cannot be found, and report it in "warnings", instead of failing the operation',
+			},
 		],
 	},
 	{
-		displayName: 'User',
+		...userRLC,
 		name: 'effectiveUser',
-		type: 'string',
-		required: true,
-		default: '',
-		placeholder: 'user@contoso.com',
-		description: 'The email address or login name of the user',
 		displayOptions: show(['getEffectivePermissions']),
 	},
+	...mappingProperties,
 ];
 
 function describeTarget(target: TargetDescriptor): IDataObject {
@@ -294,18 +330,6 @@ function describeTarget(target: TargetDescriptor): IDataObject {
 		...(target.path ? { path: target.path } : {}),
 		...(target.itemId ? { itemId: target.itemId } : {}),
 	};
-}
-
-async function getAssignments(
-	securable: SecurableQueryable,
-	options: SelectionValues = {},
-): Promise<RoleAssignmentWithBindings[]> {
-	return (await applySelection(
-		securable.roleAssignments,
-		ASSIGNMENT_SELECT,
-		options,
-		ASSIGNMENT_EXPAND,
-	)()) as unknown as RoleAssignmentWithBindings[];
 }
 
 function requireUnique(
@@ -401,49 +425,76 @@ function wrapEntryError(
 }
 
 /** Resolves names and emails to IDs. Nothing is changed in SharePoint before every entry resolves. */
-async function resolveEntries(
+export async function resolveEntries(
 	context: IExecuteFunctions,
 	sp: SPFI,
 	entries: RoleAssignmentInput[],
 	itemIndex: number,
 	ensureUsers: boolean,
+	warnings?: string[],
 ): Promise<ResolvedAssignment[]> {
 	const node = context.getNode();
 	const resolved: ResolvedAssignment[] = [];
 	for (const [position, entry] of entries.entries()) {
-		let principalId: number;
 		try {
-			principalId = await resolvePrincipalReference(
-				node,
-				sp,
-				parsePrincipalOrThrow(node, entry.principal, itemIndex, entry.principalType),
-				itemIndex,
-				ensureUsers,
-			);
-		} catch (error) {
-			throw wrapEntryError(context, error, position, entry.principal, itemIndex);
-		}
-		const roleDefinitionIds: number[] = [];
-		for (const role of entry.roles) {
+			let principalId: number;
 			try {
-				roleDefinitionIds.push(await resolveRoleId(node, sp, role, itemIndex));
+				principalId = await resolvePrincipalReference(
+					node,
+					sp,
+					parsePrincipalOrThrow(node, entry.principal, itemIndex, entry.principalType),
+					itemIndex,
+					ensureUsers,
+				);
 			} catch (error) {
-				throw wrapEntryError(context, error, position, `${entry.principal}, role ${role}`, itemIndex);
+				throw wrapEntryError(context, error, position, entry.principal, itemIndex);
 			}
+			const roleDefinitionIds: number[] = [];
+			for (const role of entry.roles) {
+				try {
+					roleDefinitionIds.push(await resolveRoleId(node, sp, role, itemIndex));
+				} catch (error) {
+					throw wrapEntryError(
+						context,
+						error,
+						position,
+						`${entry.principal}, role ${role}`,
+						itemIndex,
+					);
+				}
+			}
+			resolved.push({ principalId, roleDefinitionIds });
+		} catch (error) {
+			if (!warnings) throw toNodeError(node, error, itemIndex);
+			warnings.push(`Entry ${position + 1} was skipped: ${(error as Error).message}`);
 		}
-		resolved.push({ principalId, roleDefinitionIds });
 	}
 	return resolved;
+}
+
+const withWarnings = (result: IDataObject, warnings: string[] | undefined): IDataObject =>
+	warnings ? { ...result, warnings } : result;
+
+interface AddOptions {
+	breakInheritanceFirst?: boolean;
+	clearSubscopes?: boolean;
+	skipUnresolved?: boolean;
+}
+
+function readAddOptions(this: IExecuteFunctions, itemIndex: number): AddOptions {
+	return this.getNodeParameter('addOptions', itemIndex, {}) as AddOptions;
 }
 
 async function addFromJson(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const target = readTarget.call(this, siteUrl, itemIndex);
 	const securable = buildSecurable(sp, target);
-	const options = this.getNodeParameter('addOptions', itemIndex, {}) as {
-		breakInheritanceFirst?: boolean;
-	};
-	const entries = readJsonEntries.call(this, itemIndex, { rolesOptional: false, allowEmpty: false });
-	const resolved = await resolveEntries(this, sp, entries, itemIndex, true);
+	const options = readAddOptions.call(this, itemIndex);
+	const warnings = options.skipUnresolved ? [] : undefined;
+	const entries = readJsonEntries.call(this, itemIndex, {
+		rolesOptional: false,
+		allowEmpty: false,
+	});
+	const resolved = await resolveEntries(this, sp, entries, itemIndex, true, warnings);
 	const desired = dedupeEntries(
 		resolved.flatMap((entry) =>
 			entry.roleDefinitionIds.map((roleDefinitionId) => ({
@@ -453,10 +504,17 @@ async function addFromJson(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: 
 		),
 	);
 
+	if (desired.length === 0 && warnings) {
+		return withWarnings(
+			{ ...describeTarget(target), inheritanceBroken: false, added: 0, assignments: [] },
+			warnings,
+		);
+	}
+
 	let unique = await hasUniqueRoleAssignments(securable);
 	let inheritanceBroken = false;
 	if (!unique && (options.breakInheritanceFirst ?? true)) {
-		await securable.breakRoleInheritance(true, false);
+		await securable.breakRoleInheritance(true, options.clearSubscopes ?? false);
 		unique = true;
 		inheritanceBroken = true;
 	}
@@ -465,12 +523,15 @@ async function addFromJson(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: 
 	for (const entry of desired) {
 		await securable.roleAssignments.add(entry.principalId, entry.roleDefinitionId);
 	}
-	return {
-		...describeTarget(target),
-		inheritanceBroken,
-		added: desired.length,
-		assignments: desired as unknown as IDataObject[],
-	};
+	return withWarnings(
+		{
+			...describeTarget(target),
+			inheritanceBroken,
+			added: desired.length,
+			assignments: desired as unknown as IDataObject[],
+		},
+		warnings,
+	);
 }
 
 async function removeFromJson(
@@ -514,23 +575,36 @@ async function add(this: IExecuteFunctions, context: OperationContext) {
 	const { sp, siteUrl, itemIndex } = context;
 	const target = readTarget.call(this, siteUrl, itemIndex);
 	const securable = buildSecurable(sp, target);
-	const options = this.getNodeParameter('addOptions', itemIndex, {}) as {
-		breakInheritanceFirst?: boolean;
-	};
-	const principalId = await getPrincipalId.call(this, sp, itemIndex);
-	const roleDefinitionId = await getRoleId.call(this, sp, itemIndex);
+	const options = readAddOptions.call(this, itemIndex);
+	let principalId: number;
+	let roleDefinitionId: number;
+	try {
+		principalId = await getPrincipalId.call(this, sp, itemIndex);
+		roleDefinitionId = await getRoleId.call(this, sp, itemIndex);
+	} catch (error) {
+		if (!options.skipUnresolved) throw toNodeError(this.getNode(), error, itemIndex);
+		return {
+			...describeTarget(target),
+			inheritanceBroken: false,
+			added: 0,
+			warnings: [`The role assignment was skipped: ${(error as Error).message}`],
+		};
+	}
 
 	let unique = await hasUniqueRoleAssignments(securable);
 	let inheritanceBroken = false;
 	if (!unique && (options.breakInheritanceFirst ?? true)) {
-		await securable.breakRoleInheritance(true, false);
+		await securable.breakRoleInheritance(true, options.clearSubscopes ?? false);
 		unique = true;
 		inheritanceBroken = true;
 	}
 	requireUnique(this, unique, itemIndex, 'add a role assignment');
 
 	await securable.roleAssignments.add(principalId, roleDefinitionId);
-	return { ...describeTarget(target), principalId, roleDefinitionId, inheritanceBroken };
+	return withWarnings(
+		{ ...describeTarget(target), principalId, roleDefinitionId, inheritanceBroken },
+		options.skipUnresolved ? [] : undefined,
+	);
 }
 
 async function remove(this: IExecuteFunctions, context: OperationContext) {
@@ -571,13 +645,17 @@ function readSetEntries(this: IExecuteFunctions, itemIndex: number): RoleAssignm
 	const entries =
 		(
 			this.getNodeParameter('assignments', itemIndex, {}) as {
-				entries?: Array<{ principal: string; role: string }>;
+				entries?: Array<{ principal?: unknown; role?: unknown }>;
 			}
 		).entries ?? [];
-	return entries.map((entry) => ({
-		principal: entry.principal ?? '',
-		roles: [entry.role ?? ''],
-	}));
+	return entries.map((entry) => {
+		const { text, type } = readPrincipalInput(entry.principal);
+		return {
+			principal: text,
+			...(type ? { principalType: type } : {}),
+			roles: [locatorValue(entry.role)],
+		};
+	});
 }
 
 async function set(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
@@ -586,64 +664,44 @@ async function set(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Operatio
 	const entries = readSetEntries.call(this, itemIndex);
 	const options = this.getNodeParameter('setOptions', itemIndex, {}) as {
 		copyCurrentFirst?: boolean;
+		alwaysBreakInheritance?: boolean;
+		clearSubscopes?: boolean;
+		skipUnresolved?: boolean;
 	};
+	const warnings = options.skipUnresolved ? [] : undefined;
 
 	const desired: RoleAssignmentEntry[] = [];
-	if (readInputMode.call(this, itemIndex) === 'json') {
-		const resolved = await resolveEntries(this, sp, entries, itemIndex, true);
-		for (const entry of resolved) {
-			for (const roleDefinitionId of entry.roleDefinitionIds) {
-				desired.push({ principalId: entry.principalId, roleDefinitionId });
-			}
-		}
-	} else {
-		for (const entry of entries) {
-			const principalId = await resolvePrincipalReference(
-				this.getNode(),
-				sp,
-				parsePrincipalOrThrow(this.getNode(), entry.principal, itemIndex),
-				itemIndex,
-			);
-			const roleDefinitionId = await resolveRoleId(
-				this.getNode(),
-				sp,
-				entry.roles[0],
-				itemIndex,
-			);
-			desired.push({ principalId, roleDefinitionId });
+	const resolved = await resolveEntries(this, sp, entries, itemIndex, true, warnings);
+	for (const entry of resolved) {
+		for (const roleDefinitionId of entry.roleDefinitionIds) {
+			desired.push({ principalId: entry.principalId, roleDefinitionId });
 		}
 	}
 
 	let inheritanceBroken = false;
-	if (!(await hasUniqueRoleAssignments(securable))) {
-		await securable.breakRoleInheritance(options.copyCurrentFirst ?? false, false);
+	if (options.alwaysBreakInheritance || !(await hasUniqueRoleAssignments(securable))) {
+		await securable.breakRoleInheritance(
+			options.copyCurrentFirst ?? false,
+			options.clearSubscopes ?? false,
+		);
 		inheritanceBroken = true;
 	}
 
 	const current = flattenAssignments(await getAssignments(securable));
 	const { toAdd, toRemove } = diffAssignments(current, desired);
 
-	const [batchedSp, execute] = sp.batched();
-	const batched = buildSecurable(batchedSp as SPFI, target);
-	const pending: Array<Promise<void>> = [];
-	for (const entry of toAdd) {
-		pending.push(batched.roleAssignments.add(entry.principalId, entry.roleDefinitionId));
-	}
-	for (const entry of toRemove) {
-		pending.push(batched.roleAssignments.remove(entry.principalId, entry.roleDefinitionId));
-	}
-	if (pending.length) {
-		await execute();
-		await Promise.all(pending);
-	}
+	await applyAssignmentChanges(sp, target, toAdd, toRemove);
 
-	return {
-		...describeTarget(target),
-		inheritanceBroken,
-		added: toAdd.length,
-		removed: toRemove.length,
-		unchanged: current.length - toRemove.length,
-	};
+	return withWarnings(
+		{
+			...describeTarget(target),
+			inheritanceBroken,
+			added: toAdd.length,
+			removed: toRemove.length,
+			unchanged: current.length - toRemove.length,
+		},
+		warnings,
+	);
 }
 
 async function getEffectivePermissions(
@@ -651,7 +709,7 @@ async function getEffectivePermissions(
 	{ sp, siteUrl, itemIndex }: OperationContext,
 ) {
 	const target = readTarget.call(this, siteUrl, itemIndex);
-	const identifier = String(this.getNodeParameter('effectiveUser', itemIndex, '') ?? '').trim();
+	const identifier = locatorValue(this.getNodeParameter('effectiveUser', itemIndex, ''));
 	if (!identifier) {
 		throw new NodeOperationError(this.getNode(), 'The user must not be empty', { itemIndex });
 	}
@@ -669,6 +727,97 @@ async function getEffectivePermissions(
 	};
 }
 
+/** Reads the mapping rows or the Mappings (JSON) parameter without calling SharePoint. */
+export function readMappings(this: IExecuteFunctions, itemIndex: number): MappingInput[] {
+	if (readInputMode.call(this, itemIndex) === 'json') {
+		try {
+			return parseMappingsJson(this.getNodeParameter('mappingsJson', itemIndex, '[]'));
+		} catch (error) {
+			throw new NodeOperationError(this.getNode(), (error as Error).message, { itemIndex });
+		}
+	}
+	const rows =
+		(
+			this.getNodeParameter('mappings', itemIndex, {}) as {
+				entries?: Array<{ path?: unknown; principal?: unknown; role?: unknown }>;
+			}
+		).entries ?? [];
+	if (!rows.length) {
+		throw new NodeOperationError(this.getNode(), 'Add at least one mapping', { itemIndex });
+	}
+	return rows.map((row) => {
+		const { text, type } = readPrincipalInput(row.principal);
+		return {
+			path: String(row.path ?? '').trim(),
+			principal: text,
+			...(type ? { principalType: type } : {}),
+			roles: [locatorValue(row.role)],
+		};
+	});
+}
+
+interface MappingParameters extends Partial<Omit<MappingOptions, 'mode'>> {
+	output?: 'single' | 'perFolder';
+}
+
+export function readMappingOptions(
+	this: IExecuteFunctions,
+	itemIndex: number,
+): { options: MappingOptions; output: 'single' | 'perFolder' } {
+	const values = this.getNodeParameter('mappingOptions', itemIndex, {}) as MappingParameters;
+	return {
+		options: {
+			mode: this.getNodeParameter('mappingMode', itemIndex, 'set') === 'add' ? 'add' : 'set',
+			breakInheritance: values.breakInheritance === 'always' ? 'always' : 'ifInheriting',
+			copyCurrentFirst: values.copyCurrentFirst ?? false,
+			clearSubscopes: values.clearSubscopes ?? false,
+			createMissingFolders: values.createMissingFolders ?? false,
+			ifFolderMissing: values.ifFolderMissing === 'fail' ? 'fail' : 'skip',
+			skipUnresolved: values.skipUnresolved ?? false,
+		},
+		output: values.output === 'perFolder' ? 'perFolder' : 'single',
+	};
+}
+
+/** Builds the output of Apply Mapping: one item, or one item for each folder and missing folder. */
+export function toMappingOutput(
+	result: MappingResult,
+	baseFolder: string,
+	mode: MappingOptions['mode'],
+	output: 'single' | 'perFolder',
+): IDataObject | IDataObject[] {
+	const summary = { baseFolder, mode };
+	if (output === 'single') {
+		return { ...summary, ...result } as unknown as IDataObject;
+	}
+	const items: IDataObject[] = [
+		...result.folders.map((folder) => ({ ...summary, ...folder, missing: false })),
+		...result.missing.map((folder) => ({ ...summary, ...folder, missing: true })),
+	].map((item) => ({ ...item, warnings: result.warnings }));
+	return items.length ? items : { ...summary, ...result };
+}
+
+async function applyMapping(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
+	const rawBase = String(
+		this.getNodeParameter('baseFolder', itemIndex, '', { extractValue: true }) ?? '',
+	).trim();
+	if (!rawBase) {
+		throw new NodeOperationError(this.getNode(), 'The base folder must not be empty', {
+			itemIndex,
+		});
+	}
+	const baseFolder = getPath.call(this, siteUrl, itemIndex, 'baseFolder');
+	const mappings = readMappings.call(this, itemIndex);
+	const { options, output } = readMappingOptions.call(this, itemIndex);
+	const gateway = createMappingGateway(sp, siteUrl, this.getNode(), itemIndex);
+	try {
+		const result = await applyPermissionMapping(gateway, baseFolder, mappings, options);
+		return toMappingOutput(result, baseFolder, options.mode, output);
+	} catch (error) {
+		throw toNodeError(this.getNode(), error, itemIndex);
+	}
+}
+
 export const permissionResource: ResourceModule = {
 	option: {
 		name: 'Permission',
@@ -684,5 +833,6 @@ export const permissionResource: ResourceModule = {
 		remove,
 		set,
 		getEffectivePermissions,
+		applyMapping,
 	},
 };

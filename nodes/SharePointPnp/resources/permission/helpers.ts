@@ -1,6 +1,62 @@
 import type { IDataObject } from 'n8n-workflow';
+import type { SPFI } from '@pnp/sp/index.js';
+import type { SecurableQueryable } from '@pnp/sp/security/index.js';
 
-import type { SelectionValues } from '../../shared/selection';
+import { runInBatches } from '../../shared/batch';
+import {
+	buildSecurable,
+	type RoleAssignmentEntry,
+	type RoleAssignmentWithBindings,
+	type TargetDescriptor,
+} from '../../shared/securables';
+import { applySelection, type SelectionValues } from '../../shared/selection';
+
+export const ASSIGNMENT_SELECT = [
+	'PrincipalId',
+	'Member/Id',
+	'Member/Title',
+	'Member/LoginName',
+	'Member/PrincipalType',
+	'Member/Email',
+	'RoleDefinitionBindings/Id',
+	'RoleDefinitionBindings/Name',
+];
+
+const ASSIGNMENT_EXPAND = ['Member', 'RoleDefinitionBindings'];
+
+export async function getAssignments(
+	securable: SecurableQueryable,
+	options: SelectionValues = {},
+): Promise<RoleAssignmentWithBindings[]> {
+	return (await applySelection(
+		securable.roleAssignments,
+		ASSIGNMENT_SELECT,
+		options,
+		ASSIGNMENT_EXPAND,
+	)()) as unknown as RoleAssignmentWithBindings[];
+}
+
+/** Adds and removes role assignments of a target in SharePoint $batch requests. Throws the first error. */
+export async function applyAssignmentChanges(
+	sp: SPFI,
+	target: TargetDescriptor,
+	toAdd: RoleAssignmentEntry[],
+	toRemove: RoleAssignmentEntry[],
+): Promise<void> {
+	const changes = [
+		...toAdd.map((entry) => ({ entry, add: true })),
+		...toRemove.map((entry) => ({ entry, add: false })),
+	];
+	if (!changes.length) return;
+	const results = await runInBatches(sp, changes, (batchedSp, { entry, add }) => {
+		const assignments = buildSecurable(batchedSp, target).roleAssignments;
+		return add
+			? assignments.add(entry.principalId, entry.roleDefinitionId)
+			: assignments.remove(entry.principalId, entry.roleDefinitionId);
+	});
+	const failed = results.find((result) => !result.ok);
+	if (failed) throw failed.error;
+}
 
 interface RawAssignment {
 	PrincipalId?: number;
