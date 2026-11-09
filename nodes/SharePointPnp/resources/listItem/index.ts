@@ -11,8 +11,26 @@ import type { IList } from '@pnp/sp/lists/index.js';
 import type { SPFI } from '@pnp/sp/index.js';
 
 import { getList, getPath, listRLC, pathRLC } from '../../shared/descriptions';
+import {
+	addCamlCondition,
+	buildCamlFilter,
+	buildODataFilter,
+	fieldFiltersCombineOption,
+	fieldFiltersProperty,
+	loadFilterFieldTypes,
+	readCombine,
+	readFieldFilters,
+} from '../../shared/fieldFilters';
+import {
+	itemIdRLC,
+	listFolderRLC,
+	locatorValue,
+	mergeFieldNames,
+	parseItemId,
+} from '../../shared/pickers';
 import { toServerRelativePath } from '../../shared/utils';
 import type { OperationContext, ResourceModule } from '../types';
+import { bulkDescription, bulkOptionsDescription, createBulkOperations } from './bulk';
 import {
 	APPENDABLE_TYPES,
 	buildFormValues,
@@ -20,15 +38,10 @@ import {
 	escapeODataString,
 	expandFromSelect,
 	mergeMultiValues,
-	parseCommaList,
 	type FieldFormValue,
 	type FieldInfo,
 } from './helpers';
-import {
-	createTagClient,
-	hasTaxonomyValues,
-	resolveTaxonomyValues,
-} from './taxonomy';
+import { createTagClient, hasTaxonomyValues, resolveTaxonomyValues } from './taxonomy';
 
 const RESOURCE = 'listItem';
 const NEEDS_TARGET = ['get', 'update', 'delete'];
@@ -46,6 +59,7 @@ const show = (
 const fieldsDescription = (
 	operation: 'create' | 'update',
 	extra: Record<string, string[]> = {},
+	operations: string[] = [operation],
 ) => {
 	const verb = operation === 'create' ? 'set on the new item' : 'change';
 	return [
@@ -59,7 +73,7 @@ const fieldsDescription = (
 			],
 			default: 'mapper',
 			description: `How to give the fields to ${verb}`,
-			displayOptions: show([operation], extra),
+			displayOptions: show(operations, extra),
 		},
 		{
 			displayName: 'Fields',
@@ -79,7 +93,7 @@ const fieldsDescription = (
 					supportAutoMap: false,
 				},
 			},
-			displayOptions: show([operation], { ...extra, fieldsInputMode: ['mapper'] }),
+			displayOptions: show(operations, { ...extra, fieldsInputMode: ['mapper'] }),
 		},
 		{
 			displayName: 'Fields (JSON)',
@@ -87,9 +101,9 @@ const fieldsDescription = (
 			type: 'json',
 			default: '{}',
 			required: true,
-			placeholder: '{"Title": "Example", "Status": "Open"}',
-			description: 'An object with the internal field names as keys. Values use the same format as the field mapper: arrays for multi-value fields, ISO text for dates.',
-			displayOptions: show([operation], { ...extra, fieldsInputMode: ['json'] }),
+			description:
+				'An object with the internal field names as keys. See the documentation for an example.',
+			displayOptions: show(operations, { ...extra, fieldsInputMode: ['json'] }),
 		},
 	] as INodeProperties[];
 };
@@ -109,10 +123,28 @@ const description: INodeProperties[] = [
 				action: 'Create a list item',
 			},
 			{
+				name: 'Create Many',
+				value: 'createMany',
+				description: 'Create many list items in SharePoint batches, one for each input item',
+				action: 'Create many list items',
+			},
+			{
+				name: 'Create or Update',
+				value: 'upsert',
+				description: 'Create a new record, or update the current one if it already exists (upsert)',
+				action: 'Create or update a list item',
+			},
+			{
 				name: 'Delete',
 				value: 'delete',
 				description: 'Delete a list item or move it to the recycle bin',
 				action: 'Delete a list item',
+			},
+			{
+				name: 'Delete Many',
+				value: 'deleteMany',
+				description: 'Delete many list items in SharePoint batches, one for each input item',
+				action: 'Delete many list items',
 			},
 			{
 				name: 'Get',
@@ -131,6 +163,12 @@ const description: INodeProperties[] = [
 				value: 'update',
 				description: 'Update the fields of a list item',
 				action: 'Update a list item',
+			},
+			{
+				name: 'Update Many',
+				value: 'updateMany',
+				description: 'Update many list items in SharePoint batches, one for each input item',
+				action: 'Update many list items',
 			},
 		],
 		default: 'get',
@@ -158,16 +196,10 @@ const description: INodeProperties[] = [
 		...listRLC,
 		displayOptions: show(NEEDS_TARGET, { identifyBy: ['id'] }),
 	},
-	{
-		displayName: 'Item ID',
-		name: 'itemId',
-		type: 'number',
-		typeOptions: { minValue: 1 },
-		default: 1,
-		required: true,
-		description: 'The numeric ID of the list item',
-		displayOptions: show(NEEDS_TARGET, { identifyBy: ['id'] }),
-	},
+	itemIdRLC(
+		{ displayOptions: show(NEEDS_TARGET, { identifyBy: ['id'] }) },
+		'The list item. Choose from the list or give the numeric ID.',
+	),
 	pathRLC({
 		displayName: 'File or Folder',
 		name: 'itemPath',
@@ -176,14 +208,18 @@ const description: INodeProperties[] = [
 
 	...fieldsDescription('create'),
 	...fieldsDescription('update', { identifyBy: ['id'] }),
+	...bulkDescription,
+	...fieldsDescription('create', {}, ['createMany']),
+	...fieldsDescription('update', {}, ['updateMany', 'upsert']),
+	...bulkOptionsDescription,
 	{
 		displayName: 'Fields (JSON)',
 		name: 'fieldsJson',
 		type: 'json',
 		default: '{}',
 		required: true,
-		placeholder: '{"Title": "Example"}',
-		description: 'An object with the internal field names as keys. The field mapper needs a list, so use JSON when you identify the item by path.',
+		description:
+			'An object with the internal field names as keys. See the documentation for an example.',
 		displayOptions: show(['update'], { identifyBy: ['path'] }),
 	},
 
@@ -217,13 +253,26 @@ const description: INodeProperties[] = [
 		displayOptions: show(['getAll'], { queryMode: ['filter'] }),
 	},
 	{
-		displayName: 'Select Fields',
+		displayName: 'Select Fields Names or IDs',
+		name: 'selectFieldsPicker',
+		type: 'multiOptions',
+		typeOptions: {
+			loadOptionsMethod: 'getListFieldOptions',
+			loadOptionsDependsOn: ['list.value'],
+		},
+		default: [],
+		description:
+			'The fields to return. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>. If this and the text field are empty, the default fields are returned. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+		displayOptions: show(['getAll'], { queryMode: ['filter'] }),
+	},
+	{
+		displayName: 'Other Select Fields',
 		name: 'selectFields',
 		type: 'string',
 		default: '',
 		placeholder: 'ID,Title,Author/Title',
 		description:
-			'A comma-separated list of internal field names. Empty returns all fields. A name with a slash, such as "Author/Title", is expanded automatically',
+			'More fields as comma-separated internal names, added to the fields above. A name with a slash, such as "Author/Title", is expanded automatically.',
 		displayOptions: show(['getAll'], { queryMode: ['filter'] }),
 	},
 	{
@@ -234,9 +283,17 @@ const description: INodeProperties[] = [
 		default: '',
 		required: true,
 		placeholder: '<Where><Eq><FieldRef Name="Status"/><Value Type="Text">Open</Value></Eq></Where>',
-		description: 'The content of the Query element (Where, OrderBy), or a full View element. Large results are read in pages.',
+		description:
+			'The content of the Query element (Where, OrderBy), or a full View element. Large results are read in pages.',
 		displayOptions: show(['getAll'], { queryMode: ['caml'] }),
 	},
+	fieldFiltersProperty({
+		loadOptionsMethod: 'getListFieldOptions',
+		loadOptionsDependsOn: ['list.value'],
+		displayOptions: show(['getAll']),
+		description:
+			'Conditions on fields of the list. In filter mode they are added to the filter with "and". In CAML mode they are added to the Where element of the query with And. Filtering on a field without an index can fail when the list or folder has more than 5000 items.',
+	}),
 	{
 		displayName: 'Return All',
 		name: 'returnAll',
@@ -264,13 +321,25 @@ const description: INodeProperties[] = [
 		displayOptions: show(['get']),
 		options: [
 			{
-				displayName: 'Fields to Select',
+				displayName: 'Fields to Select Names or IDs',
+				name: 'selectFieldsPicker',
+				type: 'multiOptions',
+				typeOptions: {
+					loadOptionsMethod: 'getListFieldOptions',
+					loadOptionsDependsOn: ['list.value'],
+				},
+				default: [],
+				description:
+					'The fields to return. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>. Not used when the item is identified by path. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+			},
+			{
+				displayName: 'Other Fields to Select',
 				name: 'selectFields',
 				type: 'string',
 				default: '',
 				placeholder: 'ID,Title,Author/Title',
 				description:
-					'A comma-separated list of internal field names. Empty returns all fields. A name with a slash, such as "Author/Title", is expanded automatically',
+					'More fields as comma-separated internal names, added to the fields above. A name with a slash, such as "Author/Title", is expanded automatically.',
 			},
 			{
 				displayName: 'Return Values As',
@@ -296,14 +365,13 @@ const description: INodeProperties[] = [
 		default: {},
 		displayOptions: show(['getAll']),
 		options: [
-			{
-				displayName: 'Folder Path',
+			fieldFiltersCombineOption,
+			listFolderRLC({
+				displayName: 'Folder',
 				name: 'folderPath',
-				type: 'string',
-				default: '',
-				placeholder: 'Shared Documents/Folder',
-				description: 'Only return items in this folder. A server-relative path, a site-relative path or an absolute URL.',
-			},
+				description:
+					'Only return items in this folder. Choose from the list, or give a server-relative path, a site-relative path or an absolute URL.',
+			}),
 			{
 				displayName: 'Recursive',
 				name: 'recursive',
@@ -338,15 +406,12 @@ const description: INodeProperties[] = [
 				description:
 					'Whether to create a term when a managed metadata (tag) value is a label that does not exist in the term set of the field. The term set must be open for new terms. If off, an unknown label fails.',
 			},
-			{
-				displayName: 'Folder Path',
+			listFolderRLC({
+				displayName: 'Folder',
 				name: 'folderPath',
-				type: 'string',
-				default: '',
-				placeholder: 'Shared Documents/Folder',
 				description:
-					'Create the item in this folder. A server-relative path, a site-relative path or an absolute URL. Empty creates it in the list root',
-			},
+					'Create the item in this folder. Choose from the list, or give a server-relative path, a site-relative path or an absolute URL. Empty creates it in the list root',
+			}),
 		],
 	},
 	{
@@ -362,7 +427,8 @@ const description: INodeProperties[] = [
 				name: 'appendToMultiValue',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to add the new values to the current values of multi-choice, multi-lookup and multi-value managed metadata (tag) fields instead of replacing them. Other field types are replaced.',
+				description:
+					'Whether to add the new values to the current values of multi-choice, multi-lookup and multi-value managed metadata (tag) fields instead of replacing them. Other field types are replaced.',
 			},
 			{
 				displayName: 'Create Missing Terms',
@@ -395,7 +461,8 @@ const description: INodeProperties[] = [
 				name: 'permanent',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to delete the item for good. If off, the item goes to the recycle bin.',
+				description:
+					'Whether to delete the item for good. If off, the item goes to the recycle bin.',
 			},
 		],
 	},
@@ -436,7 +503,7 @@ async function resolveTarget(
 	}
 	return {
 		list: getList.call(this, sp, itemIndex),
-		itemId: this.getNodeParameter('itemId', itemIndex) as number,
+		itemId: parseItemId(this.getNodeParameter('itemId', itemIndex)),
 	};
 }
 
@@ -523,7 +590,7 @@ async function create(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 	const list = getList.call(this, sp, itemIndex);
 	const options = this.getNodeParameter('createOptions', itemIndex, {}) as {
 		asFolder?: boolean;
-		folderPath?: string;
+		folderPath?: unknown;
 		createMissingTerms?: boolean;
 	};
 	const fieldInfos = await getFieldInfos(list);
@@ -537,8 +604,8 @@ async function create(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 	const formValues = buildFormValues(values, fieldInfos);
 
 	const rootFolder = await list.rootFolder.select('ServerRelativeUrl')();
-	const folderPath = options.folderPath?.trim()
-		? toServerRelativePath(siteUrl, String(options.folderPath))
+	const folderPath = locatorValue(options.folderPath)
+		? toServerRelativePath(siteUrl, locatorValue(options.folderPath))
 		: rootFolder.ServerRelativeUrl;
 
 	const results = await list.addValidateUpdateItemUsingPath(
@@ -569,6 +636,7 @@ async function get(this: IExecuteFunctions, context: OperationContext) {
 	const { list, itemId } = await resolveTarget.call(this, context);
 	const options = this.getNodeParameter('getOptions', itemIndex, {}) as {
 		selectFields?: string;
+		selectFieldsPicker?: string[] | string;
 		returnValuesAs?: string;
 	};
 	const item = list.items.getById(itemId);
@@ -576,7 +644,7 @@ async function get(this: IExecuteFunctions, context: OperationContext) {
 	if (options.returnValuesAs === 'text') {
 		return (await item.fieldValuesAsText()) as IDataObject;
 	}
-	const select = parseCommaList(options.selectFields);
+	const select = mergeFieldNames(options.selectFieldsPicker, options.selectFields);
 	if (!select.length) return (await item.select(...DEFAULT_SELECT)()) as IDataObject;
 	return (await item.select(...select).expand(...expandFromSelect(select))()) as IDataObject;
 }
@@ -618,16 +686,24 @@ async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 		: (this.getNodeParameter('limit', itemIndex) as number);
 	const queryMode = this.getNodeParameter('queryMode', itemIndex) as string;
 	const options = this.getNodeParameter('getAllOptions', itemIndex, {}) as {
-		folderPath?: string;
+		folderPath?: unknown;
 		recursive?: boolean;
+		fieldFiltersCombine?: string;
 	};
-	const folderPath = options.folderPath?.trim()
-		? toServerRelativePath(siteUrl, String(options.folderPath))
+	const folderPath = locatorValue(options.folderPath)
+		? toServerRelativePath(siteUrl, locatorValue(options.folderPath))
 		: undefined;
 	const recursive = options.recursive === true;
+	const combine = readCombine(options.fieldFiltersCombine);
+	const fieldFilters = readFieldFilters(this.getNodeParameter('fieldValueFilters', itemIndex, {}));
+	const types = fieldFilters.length
+		? await loadFilterFieldTypes(list, fieldFilters)
+		: new Map<string, string>();
 
 	if (queryMode === 'caml') {
-		const caml = this.getNodeParameter('camlQuery', itemIndex) as string;
+		let caml = this.getNodeParameter('camlQuery', itemIndex) as string;
+		const condition = buildCamlFilter(fieldFilters, types, combine);
+		if (condition) caml = addCamlCondition(caml, condition);
 		const pageSize = returnAll ? STREAM_PAGE_SIZE : Math.min(limit, MAX_ROW_LIMIT);
 		return await readCamlPages(
 			list,
@@ -637,11 +713,16 @@ async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 		);
 	}
 
-	const requested = parseCommaList(this.getNodeParameter('selectFields', itemIndex, '') as string);
+	const requested = mergeFieldNames(
+		this.getNodeParameter('selectFieldsPicker', itemIndex, []),
+		this.getNodeParameter('selectFields', itemIndex, ''),
+	);
 	const select = requested.length ? requested : DEFAULT_SELECT;
 	const conditions: string[] = [];
 	const odataFilter = (this.getNodeParameter('odataFilter', itemIndex, '') as string).trim();
 	if (odataFilter) conditions.push(`(${odataFilter})`);
+	const fieldFilter = buildODataFilter(fieldFilters, types, combine);
+	if (fieldFilter) conditions.push(`(${fieldFilter})`);
 	if (folderPath) conditions.push(buildFolderFilter(folderPath, recursive));
 	const orderBy = (this.getNodeParameter('orderBy', itemIndex, '') as string).trim();
 
@@ -688,7 +769,10 @@ async function getTagCurrent(
 ): Promise<Record<string, unknown> | undefined> {
 	const tagFields = names.filter((name) => types.get(name) === 'TaxonomyFieldTypeMulti');
 	if (!tagFields.length) return undefined;
-	const current = (await list.items.getById(itemId).select(...tagFields)()) as Record<string, unknown>;
+	const current = (await list.items.getById(itemId).select(...tagFields)()) as Record<
+		string,
+		unknown
+	>;
 	return Object.fromEntries(
 		tagFields.map((name) => {
 			const value = current[name];
@@ -799,4 +883,5 @@ export const listItemResource: ResourceModule = {
 	},
 	description,
 	operations: { create, get, getAll, update, delete: deleteItem },
+	bulkOperations: createBulkOperations({ readFieldValues, resolveTags }),
 };

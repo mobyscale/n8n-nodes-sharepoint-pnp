@@ -9,6 +9,7 @@ import {
 	locator,
 	removeTestFolder,
 	runNode,
+	itWrite,
 } from './harness';
 
 describe.runIf(hasConfig)('list items', () => {
@@ -229,7 +230,7 @@ describe.runIf(hasConfig)('list items', () => {
 	});
 
 	// These tests change the tenant and need manual cleanup. Run them by hand in a sandbox site.
-	it.skip('creates and deletes a list', async () => {
+	itWrite('creates and deletes a list', async () => {
 		const [created] = await runNode({
 			resource: 'list',
 			operation: 'create',
@@ -245,7 +246,7 @@ describe.runIf(hasConfig)('list items', () => {
 		});
 	});
 
-	it.skip('creates a view and copies it to another list', async () => {
+	itWrite('creates a view and copies it to another list', async () => {
 		await runNode({
 			resource: 'list',
 			operation: 'createView',
@@ -256,7 +257,7 @@ describe.runIf(hasConfig)('list items', () => {
 		});
 	});
 
-	it.skip('sets default column values of a folder', async () => {
+	itWrite('sets default column values of a folder', async () => {
 		await runNode({
 			resource: 'list',
 			operation: 'setDefaultColumnValues',
@@ -266,7 +267,7 @@ describe.runIf(hasConfig)('list items', () => {
 		});
 	});
 
-	it.skip('creates a folder item with the field mapper', async () => {
+	itWrite('creates a folder item with the field mapper', async () => {
 		await runNode({
 			resource: 'listItem',
 			operation: 'create',
