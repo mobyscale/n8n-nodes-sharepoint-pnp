@@ -1,6 +1,7 @@
 import type { INodeProperties } from 'n8n-workflow';
 
 import { listRLC } from '../../shared/descriptions';
+import { groupRLC } from '../../shared/pickers';
 import { selectionOptions } from '../../shared/selection';
 
 export const CONTENT_TYPE_SELECT = [
@@ -128,7 +129,8 @@ export const setupDescription: INodeProperties[] = [
 				name: 'forceCheckout',
 				type: 'boolean',
 				default: false,
-				description: 'Whether files must be checked out before users can edit them. Applies to libraries.',
+				description:
+					'Whether files must be checked out before users can edit them. Applies to libraries.',
 			},
 			{
 				displayName: 'Hidden',
@@ -216,7 +218,8 @@ export const setupDescription: INodeProperties[] = [
 		default: '',
 		required: true,
 		placeholder: '<Field Type="Text" DisplayName="Example" Name="Example" />',
-		description: 'The Field element that defines the field. The common settings below do not apply.',
+		description:
+			'The Field element that defines the field. The common settings below do not apply.',
 		displayOptions: showField('schemaXml'),
 	},
 	{
@@ -335,11 +338,16 @@ export const setupDescription: INodeProperties[] = [
 		displayOptions: showField('lookup'),
 	},
 	{
-		displayName: 'Lookup Field',
+		displayName: 'Lookup Field Name or ID',
 		name: 'lookupField',
-		type: 'string',
+		type: 'options',
+		typeOptions: {
+			loadOptionsMethod: 'getLookupListFieldOptions',
+			loadOptionsDependsOn: ['lookupList.value'],
+		},
 		default: 'Title',
-		description: 'The internal name of the field in the source list that is shown',
+		description:
+			'The field of the lookup list that is shown. Use the internal name as ID. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 		displayOptions: showField('lookup'),
 	},
 	{
@@ -414,13 +422,7 @@ export const setupDescription: INodeProperties[] = [
 				default: '',
 				description: 'The description of the field',
 			},
-			{
-				displayName: 'Group',
-				name: 'group',
-				type: 'string',
-				default: '',
-				description: 'The column group of the field',
-			},
+			groupRLC,
 			{
 				displayName: 'Indexed',
 				name: 'indexed',
@@ -433,7 +435,7 @@ export const setupDescription: INodeProperties[] = [
 				name: 'internalName',
 				type: 'string',
 				default: '',
-				placeholder: 'e.g. ProjectCode',
+				placeholder: 'e.g. ReportCode',
 				description:
 					'The internal name. Only letters, digits and underscores. Empty makes SharePoint create it from the display name.',
 			},
@@ -457,7 +459,8 @@ export const setupDescription: INodeProperties[] = [
 		},
 		default: '',
 		required: true,
-		description: 'The field to change. Use the internal name as ID. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+		description:
+			'The field to change. Use the internal name as ID. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 		displayOptions: show(['updateField', 'deleteField']),
 	},
 	{
@@ -504,13 +507,7 @@ export const setupDescription: INodeProperties[] = [
 				default: false,
 				description: 'Whether each item must have a different value. The field must be indexed.',
 			},
-			{
-				displayName: 'Group',
-				name: 'group',
-				type: 'string',
-				default: '',
-				description: 'The column group of the field',
-			},
+			groupRLC,
 			{
 				displayName: 'Hidden',
 				name: 'hidden',
@@ -530,8 +527,8 @@ export const setupDescription: INodeProperties[] = [
 				name: 'otherProperties',
 				type: 'json',
 				default: '',
-				placeholder: '{"MaxLength": 100}',
-				description: 'More field properties as a JSON object. These replace the settings above.',
+				description:
+					'More field properties as a JSON object. These replace the settings above. See the documentation for an example.',
 			},
 			{
 				displayName: 'Required',

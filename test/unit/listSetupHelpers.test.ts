@@ -11,7 +11,7 @@ import {
 	toBooleanDefault,
 } from '../../nodes/SharePointPnp/resources/list/setupHelpers';
 
-const common = { displayName: 'Project Code' };
+const common = { displayName: 'Report Code' };
 
 describe('buildFieldPlan', () => {
 	it('maps a text field and keeps the common settings', () => {
@@ -30,7 +30,7 @@ describe('buildFieldPlan', () => {
 			),
 		).toEqual({
 			method: 'addText',
-			title: 'Project Code',
+			title: 'Report Code',
 			renameTo: undefined,
 			properties: {
 				Required: true,
@@ -44,9 +44,9 @@ describe('buildFieldPlan', () => {
 	});
 
 	it('creates with the internal name and renames to the display name afterward', () => {
-		const plan = buildFieldPlan('text', { ...common, internalName: 'ProjectCode' });
-		expect(plan.title).toBe('ProjectCode');
-		expect(plan.renameTo).toBe('Project Code');
+		const plan = buildFieldPlan('text', { ...common, internalName: 'ReportCode' });
+		expect(plan.title).toBe('ReportCode');
+		expect(plan.renameTo).toBe('Report Code');
 	});
 
 	it('does not rename when both names are equal', () => {
@@ -55,7 +55,7 @@ describe('buildFieldPlan', () => {
 	});
 
 	it('rejects an invalid internal name', () => {
-		expect(() => buildFieldPlan('text', { ...common, internalName: 'Project Code' })).toThrow();
+		expect(() => buildFieldPlan('text', { ...common, internalName: 'Report Code' })).toThrow();
 		expect(() => buildFieldPlan('text', { ...common, internalName: '1Code' })).toThrow();
 	});
 
@@ -150,12 +150,12 @@ describe('buildFieldPlan', () => {
 	it('builds a lookup field as schema XML', () => {
 		const plan = buildFieldPlan(
 			'lookup',
-			{ ...common, internalName: 'ProjectRef', required: true },
+			{ ...common, internalName: 'ReportRef', required: true },
 			{ lookupListId: '{11111111-1111-1111-1111-111111111111}', lookupField: 'Title' },
 		);
 		expect(plan.method).toBe('createFieldAsXml');
 		expect(plan.schemaXml).toBe(
-			'<Field Type="Lookup" DisplayName="Project Code" Name="ProjectRef" StaticName="ProjectRef" List="{11111111-1111-1111-1111-111111111111}" ShowField="Title" Required="TRUE" />',
+			'<Field Type="Lookup" DisplayName="Report Code" Name="ReportRef" StaticName="ReportRef" List="{11111111-1111-1111-1111-111111111111}" ShowField="Title" Required="TRUE" />',
 		);
 	});
 

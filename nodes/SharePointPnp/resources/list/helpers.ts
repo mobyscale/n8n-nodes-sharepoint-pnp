@@ -55,3 +55,18 @@ export function splitViewFields(
 		skipped: sourceFields.filter((name) => !available.has(name)),
 	};
 }
+
+/** The list templates that Create and Ensure offer. */
+export const LIST_TEMPLATES = [
+	{ name: 'Announcements', value: 104 },
+	{ name: 'Contacts', value: 105 },
+	{ name: 'Discussion Board', value: 108 },
+	{ name: 'Document Library', value: 101 },
+	{ name: 'Events (Calendar)', value: 106 },
+	{ name: 'Generic List', value: 100 },
+	{ name: 'Issue Tracking', value: 1100 },
+	{ name: 'Links', value: 103 },
+	{ name: 'Picture Library', value: 109 },
+	{ name: 'Survey', value: 102 },
+	{ name: 'Tasks', value: 107 },
+];
