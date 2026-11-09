@@ -3,6 +3,7 @@ import { NodeOperationError } from 'n8n-workflow';
 import type { IFieldDefault } from '@pnp/sp/column-defaults/index.js';
 
 import { getList, getPath, listRLC } from '../../shared/descriptions';
+import { listFolderRLC, locatorValue } from '../../shared/pickers';
 import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import { getRequiredString, toServerRelativePath } from '../../shared/utils';
 import type { OperationContext, ResourceModule } from '../types';
@@ -10,16 +11,15 @@ import {
 	escapeXml,
 	filterDefaultsByPath,
 	normalizeFolderPath,
+	LIST_TEMPLATES,
 	mergeFolderDefaults,
-	splitViewFields,
 	type DefaultColumnValue,
 } from './helpers';
+import { ensure } from './ensure';
+import { ensureDescription } from './ensureDescription';
 import * as setup from './setup';
-import {
-	SETUP_LIST_OPERATIONS,
-	setupDescription,
-	TARGET_OPERATIONS,
-} from './setupDescription';
+import { SETUP_LIST_OPERATIONS, setupDescription, TARGET_OPERATIONS } from './setupDescription';
+import { applyViewFields, copyListView } from './views';
 
 const show = (operation: string[]) => ({ show: { resource: ['list'], operation } });
 
@@ -69,35 +69,6 @@ const VIEW_SELECT = [
 	'ViewType',
 ];
 
-const COPIED_VIEW_SETTINGS = [
-	'ViewQuery',
-	'RowLimit',
-	'Paged',
-	'Scope',
-	'Aggregations',
-	'AggregationsStatus',
-	'ViewData',
-	'MobileView',
-	'TabularView',
-	'IncludeRootFolder',
-	'OrderedView',
-	'Threaded',
-] as const;
-
-const LIST_TEMPLATES = [
-	{ name: 'Announcements', value: 104 },
-	{ name: 'Contacts', value: 105 },
-	{ name: 'Discussion Board', value: 108 },
-	{ name: 'Document Library', value: 101 },
-	{ name: 'Events (Calendar)', value: 106 },
-	{ name: 'Generic List', value: 100 },
-	{ name: 'Issue Tracking', value: 1100 },
-	{ name: 'Links', value: 103 },
-	{ name: 'Picture Library', value: 109 },
-	{ name: 'Survey', value: 102 },
-	{ name: 'Tasks', value: 107 },
-];
-
 const LIST_OPERATIONS = [
 	'get',
 	'delete',
@@ -142,6 +113,13 @@ const description: INodeProperties[] = [
 				value: 'createField',
 				description: 'Create a field (column) in a list or in the site',
 				action: 'Create a field',
+			},
+			{
+				name: 'Create If Missing',
+				value: 'ensure',
+				description:
+					'Get a list or library by title or URL. Create it with the given settings if it does not exist.',
+				action: 'Create a list if it is missing',
 			},
 			{
 				name: 'Create View',
@@ -233,6 +211,7 @@ const description: INodeProperties[] = [
 		},
 	},
 	...setupDescription,
+	...ensureDescription,
 	{
 		displayName: 'Options',
 		name: 'getOptions',
@@ -299,7 +278,8 @@ const description: INodeProperties[] = [
 				name: 'permanent',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to delete the list for good. If off, the list goes to the recycle bin.',
+				description:
+					'Whether to delete the list for good. If off, the list goes to the recycle bin.',
 			},
 		],
 	},
@@ -358,7 +338,8 @@ const description: INodeProperties[] = [
 				name: 'includeFields',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to add the internal names of the fields of each view. This needs one more request for each view.',
+				description:
+					'Whether to add the internal names of the fields of each view. This needs one more request for each view.',
 			},
 			...selectionOptions(VIEW_SELECT),
 		],
@@ -396,7 +377,8 @@ const description: INodeProperties[] = [
 				name: 'personalView',
 				type: 'boolean',
 				default: false,
-				description: 'Whether the view is a personal view of the current user. If off, it is a public view.',
+				description:
+					'Whether the view is a personal view of the current user. If off, it is a public view.',
 			},
 			{
 				displayName: 'Query (CAML)',
@@ -439,7 +421,8 @@ const description: INodeProperties[] = [
 		},
 		default: '',
 		required: true,
-		description: 'The view in the source list. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+		description:
+			'The view in the source list. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 		displayOptions: show(['copyView']),
 	},
 	{
@@ -451,17 +434,14 @@ const description: INodeProperties[] = [
 		displayOptions: show(['copyView']),
 	},
 
-	{
-		displayName: 'Folder Path',
+	listFolderRLC({
+		displayName: 'Folder',
 		name: 'defaultsFolderPath',
-		type: 'string',
-		default: '',
 		required: true,
-		placeholder: 'Shared Documents/Folder',
 		description:
-			'The folder that gets the defaults. A server-relative path, a site-relative path or an absolute URL. Use the library root for library-wide defaults',
+			'The folder that gets the defaults. Choose from the list, or give a server-relative path, a site-relative path or an absolute URL. Use the library root for library-wide defaults',
 		displayOptions: show(['setDefaultColumnValues']),
-	},
+	}),
 	{
 		displayName: 'Default Values',
 		name: 'defaultValues',
@@ -478,18 +458,24 @@ const description: INodeProperties[] = [
 				name: 'values',
 				values: [
 					{
-						displayName: 'Field Internal Name',
+						displayName: 'Field Name or ID',
 						name: 'name',
-						type: 'string',
+						type: 'options',
+						typeOptions: {
+							loadOptionsMethod: 'getListFieldOptions',
+							loadOptionsDependsOn: ['list.value'],
+						},
 						default: '',
-						description: 'The internal name of the column',
+						description:
+							'The column. Use the internal name as ID. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 					},
 					{
 						displayName: 'Value',
 						name: 'value',
 						type: 'string',
 						default: '',
-						description: 'The default value as text. For multi-choice, separate values with a semicolon.',
+						description:
+							'The default value as text. For multi-choice, separate values with a semicolon.',
 					},
 				],
 			},
@@ -508,7 +494,8 @@ const description: INodeProperties[] = [
 				name: 'removeOthers',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to remove the existing defaults of this folder that are not in the list above. Other folders are not changed.',
+				description:
+					'Whether to remove the existing defaults of this folder that are not in the list above. Other folders are not changed.',
 			},
 		],
 	},
@@ -520,14 +507,12 @@ const description: INodeProperties[] = [
 		default: {},
 		displayOptions: show(['getDefaultColumnValues']),
 		options: [
-			{
-				displayName: 'Folder Path',
+			listFolderRLC({
+				displayName: 'Folder',
 				name: 'folderPath',
-				type: 'string',
-				default: '',
-				placeholder: 'Shared Documents/Folder',
-				description: 'Only return the defaults of this folder. Empty returns the defaults of all folders.',
-			},
+				description:
+					'Only return the defaults of this folder. Choose from the list, or give a path. Empty returns the defaults of all folders.',
+			}),
 		],
 	},
 
@@ -684,16 +669,6 @@ async function getViews(this: IExecuteFunctions, { sp, itemIndex }: OperationCon
 	return views;
 }
 
-async function applyViewFields(
-	list: ReturnType<typeof getList>,
-	viewId: string,
-	fields: string[],
-): Promise<void> {
-	const viewFields = list.views.getById(viewId).fields;
-	await viewFields.removeAll();
-	for (const field of fields) await viewFields.add(field);
-}
-
 async function createView(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
 	const list = getList.call(this, sp, itemIndex);
 	const title = getRequiredString.call(this, 'viewTitle', itemIndex);
@@ -722,43 +697,17 @@ async function createView(this: IExecuteFunctions, { sp, itemIndex }: OperationC
 }
 
 async function copyView(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
-	const target = getList.call(this, sp, itemIndex);
-	const source = getList.call(this, sp, itemIndex, 'sourceList');
+	const target = () => getList.call(this, sp, itemIndex);
+	const source = () => getList.call(this, sp, itemIndex, 'sourceList');
 	const sourceViewId = getRequiredString.call(this, 'sourceView', itemIndex);
 	const newTitle = (this.getNodeParameter('newViewTitle', itemIndex, '') as string).trim();
 
-	const sourceView = source.views.getById(sourceViewId);
-	const info = (await sourceView.select(
-		'Title',
-		'PersonalView',
-		...COPIED_VIEW_SETTINGS,
-	)()) as Record<string, unknown>;
-	const sourceFields = ((await sourceView.fields()) as { Items?: string[] }).Items ?? [];
-	const targetFields = (await target.fields.select('InternalName')()) as Array<{
-		InternalName: string;
-	}>;
-	const { kept, skipped } = splitViewFields(
-		sourceFields,
-		targetFields.map((field) => field.InternalName),
-	);
-
-	const settings: Record<string, unknown> = {};
-	for (const key of COPIED_VIEW_SETTINGS) {
-		if (info[key] !== null && info[key] !== undefined) settings[key] = info[key];
-	}
-
-	const created = (await target.views.add(
-		newTitle || String(info.Title),
-		info.PersonalView === true,
-		settings,
-	)) as { Id: string };
-	await applyViewFields(target, created.Id, kept);
-
-	const view = (await target.views
-		.getById(created.Id)
+	const copied = await copyListView(source, sourceViewId, target, newTitle);
+	const view = (await target()
+		.views.getById(copied.id)
 		.select(...VIEW_SELECT)()) as unknown as IDataObject;
-	view.ViewFields = kept;
-	view.SkippedFields = skipped;
+	view.ViewFields = copied.kept;
+	view.SkippedFields = copied.skipped;
 	return view;
 }
 
@@ -767,10 +716,10 @@ async function getDefaultColumnValues(
 	{ sp, siteUrl, itemIndex }: OperationContext,
 ) {
 	const options = this.getNodeParameter('getDefaultsOptions', itemIndex, {}) as {
-		folderPath?: string;
+		folderPath?: unknown;
 	};
-	const folderPath = options.folderPath?.trim()
-		? toServerRelativePath(siteUrl, String(options.folderPath))
+	const folderPath = locatorValue(options.folderPath)
+		? toServerRelativePath(siteUrl, locatorValue(options.folderPath))
 		: undefined;
 	const defaults = (await getList
 		.call(this, sp, itemIndex)
@@ -843,6 +792,7 @@ export const listResource: ResourceModule = {
 		get,
 		getAll,
 		create,
+		ensure,
 		delete: deleteList,
 		getFields,
 		getViews,

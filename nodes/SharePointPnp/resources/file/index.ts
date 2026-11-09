@@ -8,6 +8,7 @@ import { applySelection, selectionOptions, type SelectionValues } from '../../sh
 import { copyJobProperties, methodProperty, runMoveCopyJob } from '../../shared/copyJob';
 import {
 	buildMoveCopyOptions,
+	ensureFolder,
 	filePathRLC,
 	getDestinationPath,
 	undefinedIfNotFound,
@@ -16,6 +17,7 @@ import {
 } from '../../shared/filesFolders';
 import { joinPath, splitPath } from '../../shared/utils';
 import type { OperationContext, ResourceModule } from '../types';
+import { finishUpload, hasPostUploadSteps, parseUploadFields, type UploadOptions } from './upload';
 
 const show = (operation: string[]) => ({ show: { resource: ['file'], operation } });
 
@@ -233,11 +235,101 @@ const description: INodeProperties[] = [
 		displayOptions: show(['upload']),
 		options: [
 			{
+				displayName: 'Check In',
+				name: 'checkIn',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to check in the file after the upload. Only done when the file is checked out, for example in a library that requires check out.',
+			},
+			{
+				displayName: 'Check-In Comment',
+				name: 'checkInComment',
+				type: 'string',
+				default: '',
+				description: 'The comment for the check in. Used with Check In.',
+			},
+			{
+				displayName: 'Check-In Type',
+				name: 'checkInType',
+				type: 'options',
+				default: 'major',
+				description: 'The version type for the check in. Used with Check In.',
+				options: [
+					{ name: 'Major', value: 'major' },
+					{ name: 'Minor', value: 'minor' },
+					{ name: 'Overwrite', value: 'overwrite' },
+				],
+			},
+			{
+				displayName: 'Create Missing Folders',
+				name: 'createMissingFolders',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to create the destination folder and its missing parent folders before the upload. The library must exist.',
+			},
+			{
+				displayName: 'Fields',
+				name: 'fields',
+				type: 'fixedCollection',
+				typeOptions: { multipleValues: true },
+				placeholder: 'Add Field',
+				default: {},
+				description:
+					'List item fields to set on the file after the upload. These values replace the same fields in Fields (JSON).',
+				options: [
+					{
+						displayName: 'Field',
+						name: 'values',
+						values: [
+							{
+								displayName: 'Field Name',
+								name: 'name',
+								type: 'string',
+								default: '',
+								placeholder: 'Title',
+								description: 'The internal name of the field',
+							},
+							{
+								displayName: 'Value',
+								name: 'value',
+								type: 'string',
+								default: '',
+							},
+						],
+					},
+				],
+			},
+			{
+				displayName: 'Fields (JSON)',
+				name: 'fieldsJson',
+				type: 'json',
+				default: '{}',
+				description:
+					'An object with internal field names as keys, to set on the file after the upload. Values use the same format as List Item Create.',
+			},
+			{
 				displayName: 'Overwrite',
 				name: 'overwrite',
 				type: 'boolean',
 				default: true,
 				description: 'Whether to replace a file that has the same name',
+			},
+			{
+				displayName: 'Publish',
+				name: 'publish',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to publish the file as a major version after the upload. Only done when the file is a draft, in a library with minor versions or content approval.',
+			},
+			{
+				displayName: 'Publish Comment',
+				name: 'publishComment',
+				type: 'string',
+				default: '',
+				description: 'The comment for the publish. Used with Publish. At most 1023 characters.',
 			},
 		],
 	},
@@ -277,7 +369,7 @@ const description: INodeProperties[] = [
 				type: 'boolean',
 				default: false,
 				description:
-					'Whether to add the list item fields of the file. Same as adding ListItemAllFields to Expand. Kept for older workflows.',
+					'Whether to add the list item fields of the file in ListItemAllFields. The default properties do not change.',
 			},
 		],
 	},
@@ -368,14 +460,33 @@ const description: INodeProperties[] = [
 		displayOptions: show(['checkIn']),
 	},
 	{
-		displayName: 'Version Label',
+		displayName: 'Version',
 		name: 'versionLabel',
-		type: 'string',
+		type: 'resourceLocator',
 		required: true,
-		default: '',
-		placeholder: '1.0',
-		description: 'The label of the version to restore',
+		default: { mode: 'list', value: '' },
+		description: 'The version to restore',
 		displayOptions: show(['restoreVersion']),
+		modes: [
+			{
+				displayName: 'From List',
+				name: 'list',
+				type: 'list',
+				typeOptions: { searchListMethod: 'searchFileVersions', searchable: true },
+			},
+			{
+				displayName: 'By Label',
+				name: 'label',
+				type: 'string',
+				placeholder: '1.0',
+				validation: [
+					{
+						type: 'regex',
+						properties: { regex: '^\\d+\\.\\d+$', errorMessage: 'Not a valid version label' },
+					},
+				],
+			},
+		],
 	},
 ];
 
@@ -396,7 +507,13 @@ async function readResult(sp: SPFI, path: string, base: IDataObject): Promise<ID
 async function upload(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const folderPath = getPath.call(this, siteUrl, itemIndex, 'folderPath');
 	const binaryPropertyName = this.getNodeParameter('binaryPropertyName', itemIndex) as string;
-	const options = this.getNodeParameter('options', itemIndex, {}) as { overwrite?: boolean };
+	const options = this.getNodeParameter('options', itemIndex, {}) as UploadOptions;
+	let fields: Record<string, unknown>;
+	try {
+		fields = parseUploadFields(options);
+	} catch (error) {
+		throw new NodeOperationError(this.getNode(), error as Error, { itemIndex });
+	}
 	const binary = this.getInputData()[itemIndex].binary?.[binaryPropertyName];
 	if (!binary) {
 		throw new NodeOperationError(
@@ -412,6 +529,7 @@ async function upload(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 	}
 
 	const buffer = await this.helpers.getBinaryDataBuffer(itemIndex, binaryPropertyName);
+	if (options.createMissingFolders) await ensureFolder(sp, siteUrl, folderPath);
 	const files = sp.web.getFolderByServerRelativePath(folderPath).files;
 	const props = { Overwrite: options.overwrite ?? true };
 	const info =
@@ -425,7 +543,9 @@ async function upload(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 					) as ArrayBuffer,
 					props,
 				);
-	return info as unknown as IDataObject;
+	if (!hasPostUploadSteps(options, fields)) return info as unknown as IDataObject;
+	const path = String(info.ServerRelativeUrl ?? joinPath(folderPath, fileName));
+	return await finishUpload(sp, path, options, fields);
 }
 
 async function download(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
@@ -583,7 +703,12 @@ async function restoreVersion(
 	{ sp, siteUrl, itemIndex }: OperationContext,
 ) {
 	const path = getPath.call(this, siteUrl, itemIndex, 'filePath');
-	const versionLabel = (this.getNodeParameter('versionLabel', itemIndex) as string).trim();
+	const versionLabel = String(
+		this.getNodeParameter('versionLabel', itemIndex, '', { extractValue: true }) ?? '',
+	).trim();
+	if (!versionLabel) {
+		throw new NodeOperationError(this.getNode(), 'Select the version to restore', { itemIndex });
+	}
 	await getFile(sp, path).versions.restoreByLabel(versionLabel);
 	return { ...(await readFile(sp, path)), restoredVersionLabel: versionLabel };
 }

@@ -131,6 +131,18 @@ Use a folder or an item in the test folder.
 - [ ] **[WRITE]** Remove with an entry that has no role. All roles of the principal go.
 - [ ] **[WRITE]** Set with `[]`. All role assignments go. Do this only on an item with unique permissions in the test folder.
 
+### Apply Mapping
+
+Make the folders `A/X/Contracts`, `A/Y/Contracts` and `B` in the test folder. Use the test folder as **Base Folder**.
+
+- [ ] **[WRITE]** Add a mapping row with path `*/*/Contracts`, a test group and the role Read. The two Contracts folders get exactly that role assignment. `A` and `A/X` still inherit.
+- [ ] Run it again. Each folder has `added: 0`, `removed: 0` and `unchanged: 1`.
+- [ ] Add a row with a path that does not exist. It is in `missing`. With **If Folder Is Missing** = Fail, the node fails and SharePoint has no change.
+- [ ] **[WRITE]** Turn on **Create Missing Folders**. The node creates the folder and `created` is `true`.
+- [ ] Use a principal that does not exist. The node fails, and SharePoint has no change. With **Skip Unresolved Principals**, the output has a warning.
+- [ ] **[WRITE]** Mode = Add on a folder with other role assignments. The other role assignments stay.
+- [ ] Output = One Item Per Folder. Each folder is one item.
+
 ## Sharing
 
 - [ ] **[WRITE]** Sharing > Create Link on a test file. Try View and Edit, with the scopes Organization and Anyone.

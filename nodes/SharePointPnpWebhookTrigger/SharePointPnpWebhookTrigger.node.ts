@@ -10,6 +10,7 @@ import type {
 } from 'n8n-workflow';
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
+import { getChangeItemFieldOptions } from '../SharePointPnp/methods/changeOptions';
 import * as listSearch from '../SharePointPnp/methods/listSearch';
 import {
 	eventsProperty,
@@ -118,7 +119,7 @@ export class SharePointPnpWebhookTrigger implements INodeType {
 		],
 	};
 
-	methods = { listSearch };
+	methods = { listSearch, loadOptions: { getChangeItemFieldOptions } };
 
 	webhookMethods = {
 		default: {

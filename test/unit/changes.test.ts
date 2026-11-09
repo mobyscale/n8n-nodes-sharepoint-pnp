@@ -362,6 +362,20 @@ describe('RecycleBinLookup', () => {
 		expect(source.findByUniqueId).toHaveBeenCalledTimes(1);
 	});
 
+	it('finds many entries with one query for each 20 UniqueIds', async () => {
+		const findByUniqueIds = vi.fn(async (ids: string[]) =>
+			ids.filter((id) => id !== 'x7').map((id) => entry(id, '2024-01-01T00:00:00Z')),
+		);
+		const source: RecycleBinSource = { findByUniqueId: vi.fn(), findByUniqueIds, getPage: vi.fn() };
+		const lookup = new RecycleBinLookup(source);
+		await lookup.findMany(Array.from({ length: 45 }, (_, i) => ({ uniqueId: `x${i}` })));
+		expect(findByUniqueIds.mock.calls.map(([ids]) => ids.length)).toEqual([20, 20, 5]);
+		expect((await lookup.find('X3'))?.Id).toBe('rb-x3');
+		expect(await lookup.find('x7')).toBeUndefined();
+		expect(findByUniqueIds).toHaveBeenCalledTimes(3);
+		expect(source.getPage).not.toHaveBeenCalled();
+	});
+
 	it('does not hide access errors', async () => {
 		const source: RecycleBinSource = {
 			findByUniqueId: async () => {

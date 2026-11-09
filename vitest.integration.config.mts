@@ -8,7 +8,8 @@ import { defineConfig } from 'vitest/config';
 const envPath = resolve(import.meta.dirname, '.env');
 if (existsSync(envPath)) loadEnvFile(envPath);
 
-const read = (path?: string) => (path ? readFileSync(resolve(import.meta.dirname, path), 'utf8') : '');
+const read = (path?: string) =>
+	path ? readFileSync(resolve(import.meta.dirname, path), 'utf8') : '';
 
 const integration = process.env.SP_SITE_URL
 	? {
@@ -22,6 +23,7 @@ const integration = process.env.SP_SITE_URL
 			siteUrl: process.env.SP_SITE_URL,
 			libraryPath: process.env.SP_TEST_LIBRARY_PATH ?? 'Shared Documents',
 			webhookNotificationUrl: process.env.SP_WEBHOOK_NOTIFICATION_URL ?? '',
+			runWriteTests: process.env.SP_RUN_WRITE_TESTS === 'true',
 		}
 	: null;
 

@@ -3,12 +3,13 @@ import type {
 	IDataObject,
 	IExecuteFunctions,
 	IHttpRequestHelper,
+	ILoadOptionsFunctions,
 	IHttpRequestOptions,
 	IN8nHttpFullResponse,
 	INode,
 	INodeExecutionData,
 } from 'n8n-workflow';
-import { inject } from 'vitest';
+import { inject, it } from 'vitest';
 
 import { SharePointPnpCertificateApi } from '../../credentials/SharePointPnpCertificateApi.credentials';
 import { undefinedIfNotFound } from '../../nodes/SharePointPnp/shared/filesFolders';
@@ -28,6 +29,8 @@ export interface IntegrationConfig {
 	libraryPath: string;
 	/** An HTTPS URL that answers the SharePoint webhook validation request. Optional. */
 	webhookNotificationUrl: string;
+	/** SP_RUN_WRITE_TESTS=true. Runs the tests that change the site, lists, schema or term store. */
+	runWriteTests: boolean;
 }
 
 declare module 'vitest' {
@@ -38,6 +41,12 @@ declare module 'vitest' {
 
 export const config = inject('integration');
 export const hasConfig = config !== null;
+
+/**
+ * For tests that change the site, lists, fields, content types, settings or the term store. They run
+ * only with SP_RUN_WRITE_TESTS=true, on a site that you can change and reset.
+ */
+export const itWrite = config?.runWriteTests ? it : it.skip;
 
 const node: INode = {
 	id: 'integration',
@@ -155,6 +164,22 @@ export async function runNode(
 }
 
 export const locator = (value: string, mode = 'path') => ({ __rl: true, mode, value });
+
+/** A minimal n8n load options context, for the listSearch and loadOptions methods. */
+export function createLoadOptionsContext(parameters: IDataObject): ILoadOptionsFunctions {
+	const allParameters: IDataObject = {
+		authentication: 'certificate',
+		site: { __rl: true, mode: 'url', value: config?.siteUrl },
+		...parameters,
+	};
+	return {
+		getNode: () => node,
+		getCredentials: async () => getCredentials(),
+		getNodeParameter: (name: string, fallback?: unknown, options?: { extractValue?: boolean }) =>
+			getParameter(allParameters, name, fallback, options?.extractValue ?? false),
+		helpers: { httpRequestWithAuthentication },
+	} as unknown as ILoadOptionsFunctions;
+}
 
 export function createTestSp() {
 	return createSp(createExecuteContext({}), config!.siteUrl);

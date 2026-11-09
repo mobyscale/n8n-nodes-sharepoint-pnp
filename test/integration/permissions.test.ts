@@ -1,8 +1,17 @@
-import type { IDataObject } from 'n8n-workflow';
+import type { IDataObject, ILoadOptionsFunctions } from 'n8n-workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { searchListItems } from '../../nodes/SharePointPnp/methods/listSearchItems';
+import {
+	searchGroupMembers,
+	searchGroups,
+	searchPrincipals,
+	searchRoleDefinitions,
+	searchUsers,
+} from '../../nodes/SharePointPnp/methods/listSearchPrincipals';
 import { isSystemAccount } from '../../nodes/SharePointPnp/shared/securables';
 import {
+	createExecuteContext,
 	createTestFolder,
 	createTestSp,
 	hasConfig,
@@ -213,7 +222,9 @@ describe.runIf(hasConfig)('permission', () => {
 			resource: 'permission',
 			operation: 'add',
 			...folderTarget(path),
-			...json([{ principal: visitorGroupTitle, principalType: 'group', roles: ['Read', 'Contribute'] }]),
+			...json([
+				{ principal: visitorGroupTitle, principalType: 'group', roles: ['Read', 'Contribute'] },
+			]),
 		});
 		expect(added[0].json).toMatchObject({ inheritanceBroken: true, added: 2 });
 		expect(await roleIds()).toEqual([readRoleId, contributeRoleId].sort());
@@ -232,7 +243,9 @@ describe.runIf(hasConfig)('permission', () => {
 			...folderTarget(path),
 			...json([{ principal: visitorGroupTitle }]),
 		});
-		expect(removed[0].json.removed).toEqual([{ principalId: visitorGroupId, allRolesRemoved: true }]);
+		expect(removed[0].json.removed).toEqual([
+			{ principalId: visitorGroupId, allRolesRemoved: true },
+		]);
 		expect(await roleIds()).toBeUndefined();
 
 		const set = await runNode({
@@ -482,5 +495,280 @@ describe.runIf(hasConfig)('group and user', () => {
 			getAllOptions: { additionalProperties: 'Expiration' },
 		});
 		expect(slim[0].json).toHaveProperty('Expiration');
+	});
+});
+
+describe.runIf(hasConfig)('permission pickers and Set options', () => {
+	let testFolder: string | undefined;
+	let visitorGroupId = 0;
+
+	const loadContext = (extra: Record<string, unknown> = {}) => {
+		const execute = createExecuteContext(extra);
+		return {
+			...execute,
+			getNodeParameter: (name: string, _fallback?: unknown, options?: { extractValue?: boolean }) =>
+				execute.getNodeParameter(name, 0, '', options),
+		} as unknown as ILoadOptionsFunctions;
+	};
+
+	const fileTarget = (path: string) => ({ target: 'file', filePath: locator(path) });
+
+	async function createFile(name: string): Promise<string> {
+		const path = `${testFolder}/${name}`;
+		await createTestSp()
+			.web.getFolderByServerRelativePath(testFolder!)
+			.files.addUsingPath(name, 'test', { Overwrite: true });
+		return path;
+	}
+
+	beforeAll(async () => {
+		testFolder = await createTestFolder();
+		visitorGroupId = (await createTestSp().web.associatedVisitorGroup.select('Id')()).Id;
+	});
+
+	afterAll(async () => {
+		await removeTestFolder(testFolder);
+	});
+
+	it('lists users, principals, groups, roles and list items without changing anything', async () => {
+		const users = await searchUsers.call(loadContext());
+		expect(users.results.every((entry) => entry.value && entry.name)).toBe(true);
+		expect(users.results.some((entry) => /^SHAREPOINT\system$/i.test(String(entry.value)))).toBe(
+			false,
+		);
+
+		const principals = await searchPrincipals.call(loadContext());
+		expect(principals.results.some((entry) => entry.name.startsWith('Group: '))).toBe(true);
+		expect(
+			principals.results.every((entry) => /^(Group|User): /.test(entry.name) && entry.value),
+		).toBe(true);
+
+		const groups = await searchGroups.call(loadContext());
+		expect(groups.results.some((entry) => entry.value === String(visitorGroupId))).toBe(true);
+
+		const roles = await searchRoleDefinitions.call(loadContext());
+		expect(roles.results.some((entry) => entry.name === 'Read')).toBe(true);
+
+		const members = await searchGroupMembers.call(
+			loadContext({ group: locator(String(visitorGroupId), 'list') }),
+		);
+		expect(Array.isArray(members.results)).toBe(true);
+
+		const items = await searchListItems
+			.call(loadContext({ list: locator('Documents', 'title') }))
+			.catch(() => ({ results: [] }));
+		expect(Array.isArray(items.results)).toBe(true);
+	});
+
+	it('skips unresolved entries, breaks inheritance again and clears subscopes', async () => {
+		const path = await createFile('picker-set.txt');
+		const entries = JSON.stringify([
+			{ principal: String(visitorGroupId), role: 'Read' },
+			{ principal: '__pnp-missing-principal', role: 'Read' },
+		]);
+
+		await expect(
+			runNode({
+				resource: 'permission',
+				operation: 'set',
+				...fileTarget(path),
+				inputMode: 'json',
+				roleAssignmentsJson: entries,
+			}),
+		).rejects.toThrow(/__pnp-missing-principal/);
+
+		const [first] = await runNode({
+			resource: 'permission',
+			operation: 'set',
+			...fileTarget(path),
+			inputMode: 'json',
+			roleAssignmentsJson: entries,
+			setOptions: { skipUnresolved: true, clearSubscopes: true },
+		});
+		expect(first.json).toMatchObject({ inheritanceBroken: true, added: 1 });
+		expect(first.json.warnings).toHaveLength(1);
+
+		const [again] = await runNode({
+			resource: 'permission',
+			operation: 'set',
+			...fileTarget(path),
+			assignments: {
+				entries: [
+					{
+						principal: locator(String(visitorGroupId), 'id'),
+						role: locator('Read', 'name'),
+					},
+				],
+			},
+			setOptions: { alwaysBreakInheritance: true, copyCurrentFirst: false },
+		});
+		expect(again.json).toMatchObject({ inheritanceBroken: true, removed: 0 });
+
+		const assignments = await runNode({
+			resource: 'permission',
+			operation: 'getAll',
+			...fileTarget(path),
+		});
+		expect(assignments).toHaveLength(1);
+		expect(assignments[0].json.principalId).toBe(visitorGroupId);
+	});
+});
+
+describe.runIf(hasConfig)('permission Apply Mapping', () => {
+	let testFolder: string | undefined;
+	let visitorGroupId = 0;
+	let visitorGroupTitle = '';
+	let readRoleId = 0;
+	let contributeRoleId = 0;
+
+	interface FolderJson {
+		path: string;
+		inheritanceBroken: boolean;
+		added: number;
+		removed: number;
+		unchanged: number;
+		created: boolean;
+	}
+
+	async function getAssignments(path: string): Promise<AssignmentJson[]> {
+		const items = await runNode({
+			resource: 'permission',
+			operation: 'getAll',
+			target: 'folder',
+			folderPath: locator(path),
+		});
+		return items.map((item) => item.json as unknown as AssignmentJson);
+	}
+
+	beforeAll(async () => {
+		testFolder = await createTestFolder();
+		const sp = createTestSp();
+		for (const path of ['A', 'A/X', 'A/X/Contracts', 'A/Y', 'A/Y/Contracts', 'B']) {
+			await sp.web.folders.addUsingPath(`${testFolder}/${path}`);
+		}
+		const visitors = await sp.web.associatedVisitorGroup.select('Id', 'Title')();
+		visitorGroupId = visitors.Id;
+		visitorGroupTitle = visitors.Title;
+		readRoleId = (await sp.web.roleDefinitions.getByName('Read').select('Id')()).Id;
+		contributeRoleId = (await sp.web.roleDefinitions.getByName('Contribute').select('Id')()).Id;
+	});
+
+	afterAll(async () => {
+		await removeTestFolder(testFolder);
+	});
+
+	it('applies a wildcard mapping, then changes nothing on a second run', async () => {
+		const [first] = await runNode({
+			resource: 'permission',
+			operation: 'applyMapping',
+			baseFolder: locator(testFolder!),
+			inputMode: 'json',
+			mappingsJson: JSON.stringify([
+				{
+					path: '*/*/Contracts',
+					principal: visitorGroupTitle,
+					principalType: 'group',
+					role: 'Read',
+				},
+				{ path: 'B', principal: String(visitorGroupId), role: 'Read' },
+				{ path: 'C', principal: String(visitorGroupId), role: 'Read' },
+			]),
+		});
+		const folders = first.json.folders as unknown as FolderJson[];
+		expect(folders.map((folder) => folder.path).sort()).toEqual([
+			'A/X/Contracts',
+			'A/Y/Contracts',
+			'B',
+		]);
+		expect(folders.every((folder) => folder.inheritanceBroken && folder.added === 1)).toBe(true);
+		expect(first.json.missing).toEqual([
+			expect.objectContaining({ path: 'C', serverRelativeUrl: `${testFolder}/C` }),
+		]);
+
+		for (const path of ['A/X/Contracts', 'A/Y/Contracts', 'B']) {
+			const assignments = await getAssignments(`${testFolder}/${path}`);
+			expect(assignments).toHaveLength(1);
+			expect(assignments[0]).toMatchObject({
+				hasUniqueRoleAssignments: true,
+				principalId: visitorGroupId,
+			});
+			expect(assignments[0].roleDefinitions.map((role) => role.id)).toEqual([readRoleId]);
+		}
+		expect((await getAssignments(`${testFolder}/A/X`))[0].hasUniqueRoleAssignments).toBe(false);
+
+		const again = await runNode({
+			resource: 'permission',
+			operation: 'applyMapping',
+			baseFolder: locator(testFolder!),
+			inputMode: 'fields',
+			mappings: {
+				entries: [
+					{
+						path: '*/*/contracts',
+						principal: locator(String(visitorGroupId), 'id'),
+						role: locator('Read', 'name'),
+					},
+				],
+			},
+			mappingOptions: { output: 'perFolder' },
+		});
+		expect(again).toHaveLength(2);
+		for (const item of again) {
+			expect(item.json).toMatchObject({
+				inheritanceBroken: false,
+				added: 0,
+				removed: 0,
+				unchanged: 1,
+				missing: false,
+			});
+		}
+	});
+
+	it('creates a missing folder and keeps the copied roles in Add mode', async () => {
+		const [result] = await runNode({
+			resource: 'permission',
+			operation: 'applyMapping',
+			baseFolder: locator(testFolder!),
+			inputMode: 'json',
+			mappingsJson: JSON.stringify([
+				{ path: 'B/New', principal: visitorGroupTitle, roles: ['Read', 'Contribute'] },
+			]),
+			mappingMode: 'add',
+			mappingOptions: { createMissingFolders: true },
+		});
+		// B/New inherits Read from B. Add mode copies it when it breaks inheritance.
+		expect(result.json.folders).toEqual([
+			expect.objectContaining({
+				path: 'B/New',
+				created: true,
+				inheritanceBroken: true,
+				added: 1,
+				removed: 0,
+				unchanged: 1,
+			}),
+		]);
+		const assignments = await getAssignments(`${testFolder}/B/New`);
+		expect(
+			assignments
+				.find((a) => a.principalId === visitorGroupId)
+				?.roleDefinitions.map((r) => r.id)
+				.sort(),
+		).toEqual([readRoleId, contributeRoleId].sort());
+	});
+
+	it('fails before any change when a principal cannot be resolved', async () => {
+		await expect(
+			runNode({
+				resource: 'permission',
+				operation: 'applyMapping',
+				baseFolder: locator(testFolder!),
+				inputMode: 'json',
+				mappingsJson: JSON.stringify([
+					{ path: 'A', principal: String(visitorGroupId), role: 'Read' },
+					{ path: 'A', principal: '__pnp-test-missing-group', role: 'Read' },
+				]),
+			}),
+		).rejects.toThrow(/Mapping 2 "__pnp-test-missing-group"/);
+		expect((await getAssignments(`${testFolder}/A`))[0].hasUniqueRoleAssignments).toBe(false);
 	});
 });

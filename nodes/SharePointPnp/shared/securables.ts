@@ -7,6 +7,7 @@ import { Item } from '@pnp/sp/items/index.js';
 
 import { getListFromLocator, listRLC, pathRLC } from './descriptions';
 import { toServerRelativePath } from './utils';
+import { locatorValue } from './pickers';
 
 export type TargetKind = 'site' | 'list' | 'folder' | 'file' | 'listItem';
 
@@ -23,6 +24,22 @@ export interface RoleAssignmentEntry {
 export interface LocatorValue {
 	mode: string;
 	value: string;
+}
+
+/** Reads the text of a resource locator value. Plain strings, for example from an expression, work too. */
+export interface PrincipalInput {
+	text: string;
+	type?: 'user' | 'group';
+}
+
+/** Reads a principal field. The "By Email or Login" mode means a user and the "By Name" mode means a group. */
+export function readPrincipalInput(raw: unknown): PrincipalInput {
+	const text = locatorValue(raw);
+	const mode =
+		raw !== null && typeof raw === 'object' ? (raw as { mode?: string }).mode : undefined;
+	if (mode === 'user') return { text, type: 'user' };
+	if (mode === 'name') return { text, type: 'group' };
+	return { text };
 }
 
 const TARGET_KINDS: TargetKind[] = ['site', 'list', 'folder', 'file', 'listItem'];
@@ -212,6 +229,94 @@ export const groupRLC: INodeProperties = {
 	],
 };
 
+export const userRLC: INodeProperties = {
+	displayName: 'User',
+	name: 'user',
+	type: 'resourceLocator',
+	default: { mode: 'list', value: '' },
+	required: true,
+	description: 'The user. Pick a user of the site, or type an email address or a login name.',
+	typeOptions: { loadOptionsDependsOn: ['site.value'] },
+	modes: [
+		{
+			displayName: 'From List',
+			name: 'list',
+			type: 'list',
+			typeOptions: { searchListMethod: 'searchUsers', searchable: true },
+		},
+		{
+			displayName: 'By Email or Login',
+			name: 'user',
+			type: 'string',
+			placeholder: 'user@contoso.com',
+			hint: 'An email address or a login name such as i:0#.f|membership|user@contoso.com',
+		},
+	],
+};
+
+/** A group or a user. In "From List" mode the search lists both. */
+export const principalRLC: INodeProperties = {
+	displayName: 'Principal',
+	name: 'principal',
+	type: 'resourceLocator',
+	default: { mode: 'list', value: '' },
+	required: true,
+	description: 'A group or a user',
+	typeOptions: { loadOptionsDependsOn: ['site.value'] },
+	modes: [
+		{
+			displayName: 'From List',
+			name: 'list',
+			type: 'list',
+			typeOptions: { searchListMethod: 'searchPrincipals', searchable: true },
+		},
+		{
+			displayName: 'By Email or Login',
+			name: 'user',
+			type: 'string',
+			placeholder: 'user@contoso.com',
+			hint: 'An email address or a login name such as i:0#.f|membership|user@contoso.com',
+		},
+		{ displayName: 'By Group Name', name: 'name', type: 'string', placeholder: 'Example Members' },
+		{
+			displayName: 'By ID',
+			name: 'id',
+			type: 'string',
+			placeholder: '5',
+			validation: [
+				{ type: 'regex', properties: { regex: '^\\d+$', errorMessage: 'Not a valid ID' } },
+			],
+		},
+	],
+};
+
+export const itemIdRLC: INodeProperties = {
+	displayName: 'Item',
+	name: 'itemId',
+	type: 'resourceLocator',
+	default: { mode: 'list', value: '' },
+	required: true,
+	description: 'The list item',
+	typeOptions: { loadOptionsDependsOn: ['site.value', 'list.value'] },
+	modes: [
+		{
+			displayName: 'From List',
+			name: 'list',
+			type: 'list',
+			typeOptions: { searchListMethod: 'searchListItems', searchable: true },
+		},
+		{
+			displayName: 'By ID',
+			name: 'id',
+			type: 'string',
+			placeholder: '1',
+			validation: [
+				{ type: 'regex', properties: { regex: '^\\d+$', errorMessage: 'Not a valid ID' } },
+			],
+		},
+	],
+};
+
 /** The "Target" picker of the permission operations. */
 export function targetProperties(resource: string, operations: string[]): INodeProperties[] {
 	return [
@@ -235,13 +340,7 @@ export function targetProperties(resource: string, operations: string[]): INodeP
 			displayOptions: show(resource, operations, { target: ['list', 'listItem'] }),
 		},
 		{
-			displayName: 'Item ID',
-			name: 'itemId',
-			type: 'number',
-			typeOptions: { minValue: 1 },
-			required: true,
-			default: 1,
-			description: 'The ID of the list item',
+			...itemIdRLC,
 			displayOptions: show(resource, operations, { target: ['listItem'] }),
 		},
 		pathRLC({
@@ -273,13 +372,7 @@ export function principalProperties(
 	userOnly = false,
 ): INodeProperties[] {
 	const userField: INodeProperties = {
-		displayName: 'User',
-		name: 'user',
-		type: 'string',
-		required: true,
-		default: '',
-		placeholder: 'user@contoso.com',
-		description: 'The email address or login name of the user',
+		...userRLC,
 		displayOptions: show(resource, operations, userOnly ? {} : { principalType: ['user'] }),
 	};
 	if (userOnly) return [userField];
@@ -378,7 +471,7 @@ export async function resolvePrincipalReference(
 }
 
 export function getUserParameter(this: IExecuteFunctions, itemIndex: number): string {
-	const user = String(this.getNodeParameter('user', itemIndex, '') ?? '').trim();
+	const user = locatorValue(this.getNodeParameter('user', itemIndex, ''));
 	if (!user) {
 		throw new NodeOperationError(this.getNode(), 'The user must not be empty', { itemIndex });
 	}
@@ -426,6 +519,16 @@ export interface TargetDescriptor {
 	itemId?: number;
 }
 
+function readItemId(this: IExecuteFunctions, itemIndex: number): number {
+	const text = locatorValue(this.getNodeParameter('itemId', itemIndex, ''));
+	if (!/^\d+$/.test(text) || Number(text) < 1) {
+		throw new NodeOperationError(this.getNode(), `"${text}" is not a valid list item ID`, {
+			itemIndex,
+		});
+	}
+	return Number(text);
+}
+
 /** Reads the target parameters without calling SharePoint. */
 export function readTarget(
 	this: IExecuteFunctions,
@@ -445,7 +548,7 @@ export function readTarget(
 			return {
 				kind,
 				list: getLocator.call(this, 'list', itemIndex),
-				itemId: this.getNodeParameter('itemId', itemIndex) as number,
+				itemId: readItemId.call(this, itemIndex),
 			};
 		case 'folder':
 		case 'file': {

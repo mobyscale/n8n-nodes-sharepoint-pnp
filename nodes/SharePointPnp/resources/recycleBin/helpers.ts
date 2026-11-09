@@ -148,3 +148,12 @@ export function isInSite(item: RecycleBinRawItem, siteServerRelativeUrl: string)
 	const dir = (item.DirName ?? '').replace(/^\/+/, '').toLowerCase();
 	return dir === prefix || dir.startsWith(`${prefix}/`);
 }
+
+/** Builds the name of a recycle bin item in a picker: "Title (DirName, deleted by Name)". */
+export function toRecycleBinOptionName(item: RecycleBinRawItem): string {
+	const title = item.Title || item.LeafName || item.Id;
+	const details = [item.DirName, item.DeletedByName ? `deleted by ${item.DeletedByName}` : '']
+		.filter(Boolean)
+		.join(', ');
+	return details ? `${title} (${details})` : title;
+}

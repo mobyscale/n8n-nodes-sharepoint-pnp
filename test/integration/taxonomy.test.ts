@@ -9,6 +9,7 @@ import {
 	locator,
 	removeTestFolder,
 	runNode,
+	itWrite,
 } from './harness';
 
 interface Group {
@@ -126,7 +127,7 @@ describe.runIf(hasConfig)('taxonomy (read only)', () => {
 		}
 	});
 
-	it.skip('creates, updates and deletes a term (term store writes are tenant wide)', async () => {
+	itWrite('creates, updates and deletes a term (term store writes are tenant wide)', async () => {
 		const sets = (await run('getTermSets', { returnAll: true })) as unknown as SetInfo[];
 		const setId = sets[0].id;
 		const [created] = (await run('createTerm', {
@@ -271,7 +272,7 @@ describe.runIf(hasConfig)('tags on list items', () => {
 		await expect(update(`__pnp-missing-${Date.now()}`)).rejects.toThrow(/does not exist/);
 	});
 
-	it.skip('creates a missing term (term store writes are tenant wide)', async () => {
+	itWrite('creates a missing term (term store writes are tenant wide)', async () => {
 		await update(`__pnp-test-${Date.now()}`, { createMissingTerms: true });
 	});
 });

@@ -3,9 +3,11 @@ import { NodeOperationError } from 'n8n-workflow';
 import type { IFields } from '@pnp/sp/fields/index.js';
 import type { IContentTypes } from '@pnp/sp/content-types/index.js';
 import type { SPFI } from '@pnp/sp/index.js';
+import type { IList } from '@pnp/sp/lists/index.js';
 
 import { getList, getListFromLocator } from '../../shared/descriptions';
 import { applySelection, type SelectionValues } from '../../shared/selection';
+import { locatorValue } from '../../shared/pickers';
 import { getRequiredString } from '../../shared/utils';
 import type { OperationContext } from '../types';
 import { CONTENT_TYPE_SELECT } from './setupDescription';
@@ -46,9 +48,7 @@ function isSiteTarget(ctx: IExecuteFunctions, itemIndex: number): boolean {
 
 /** The fields collection of the list or of the site. PnPjs keeps query state, so call this for each request. */
 function targetFields(ctx: IExecuteFunctions, sp: SPFI, itemIndex: number): IFields {
-	return isSiteTarget(ctx, itemIndex)
-		? sp.web.fields
-		: getList.call(ctx, sp, itemIndex).fields;
+	return isSiteTarget(ctx, itemIndex) ? sp.web.fields : getList.call(ctx, sp, itemIndex).fields;
 }
 
 function targetContentTypes(ctx: IExecuteFunctions, sp: SPFI, itemIndex: number): IContentTypes {
@@ -58,7 +58,8 @@ function targetContentTypes(ctx: IExecuteFunctions, sp: SPFI, itemIndex: number)
 }
 
 function readFieldType(ctx: IExecuteFunctions, itemIndex: number): FieldTypeSettings {
-	const read = <T>(name: string) => ctx.getNodeParameter(name, itemIndex, undefined) as T | undefined;
+	const read = <T>(name: string) =>
+		ctx.getNodeParameter(name, itemIndex, undefined) as T | undefined;
 	const lookupList = read<LocatorValue>('lookupList');
 	return {
 		maxLength: read('maxLength'),
@@ -123,7 +124,11 @@ export async function createField(this: IExecuteFunctions, { sp, itemIndex }: Op
 	> & { addToDefaultView?: boolean };
 	const displayName =
 		type === 'schemaXml' ? '' : getRequiredString.call(this, 'displayName', itemIndex);
-	const plan = buildFieldPlan(type, { ...common, displayName }, readFieldType(this, itemIndex));
+	const plan = buildFieldPlan(
+		type,
+		{ ...common, displayName, group: locatorValue(common.group) },
+		readFieldType(this, itemIndex),
+	);
 
 	const fields = () => targetFields(this, sp, itemIndex);
 	let created: Record<string, unknown>;
@@ -139,13 +144,16 @@ export async function createField(this: IExecuteFunctions, { sp, itemIndex }: Op
 	}
 
 	const id = String(created.Id ?? (created.d as { Id?: string } | undefined)?.Id ?? '');
-	const locate = () =>
-		id ? fields().getById(id) : fields().getByInternalNameOrTitle(plan.title);
+	const locate = () => (id ? fields().getById(id) : fields().getByInternalNameOrTitle(plan.title));
 
 	if (plan.renameTo) await locate().update({ Title: plan.renameTo });
 	const result = (await locate().select(...FIELD_RESULT_SELECT)()) as unknown as IDataObject;
 
-	if (common.addToDefaultView && !isSiteTarget(this, itemIndex) && plan.method !== 'createFieldAsXml') {
+	if (
+		common.addToDefaultView &&
+		!isSiteTarget(this, itemIndex) &&
+		plan.method !== 'createFieldAsXml'
+	) {
 		await getList.call(this, sp, itemIndex).defaultView.fields.add(String(result.InternalName));
 	}
 	return result;
@@ -154,7 +162,9 @@ export async function createField(this: IExecuteFunctions, { sp, itemIndex }: Op
 export async function updateField(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
 	const name = getRequiredString.call(this, 'field', itemIndex);
 	const options = this.getNodeParameter('updateFieldOptions', itemIndex, {}) as FieldUpdateOptions;
-	const properties = buildFieldUpdate(options);
+	const properties = buildFieldUpdate(
+		'group' in options ? { ...options, group: locatorValue(options.group) } : options,
+	);
 	if (!Object.keys(properties).length) {
 		throw new NodeOperationError(this.getNode(), 'Add at least one option to update', {
 			itemIndex,
@@ -198,10 +208,7 @@ export async function getContentTypes(
 	return (await query()) as unknown as IDataObject[];
 }
 
-export async function addContentType(
-	this: IExecuteFunctions,
-	{ sp, itemIndex }: OperationContext,
-) {
+export async function addContentType(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
 	const contentTypeId = getRequiredString.call(this, 'siteContentType', itemIndex);
 	const options = this.getNodeParameter('addContentTypeOptions', itemIndex, {}) as {
 		enableContentTypes?: boolean;
@@ -222,11 +229,33 @@ export async function removeContentType(
 ) {
 	const contentTypeId = getRequiredString.call(this, 'listContentType', itemIndex);
 	const list = () => getList.call(this, sp, itemIndex);
-	const info = (await list()
-		.contentTypes.getById(contentTypeId)
-		.select('StringId', 'Name')()) as { StringId: string; Name: string };
+	const info = (await list().contentTypes.getById(contentTypeId).select('StringId', 'Name')()) as {
+		StringId: string;
+		Name: string;
+	};
 	await list().contentTypes.getById(contentTypeId).delete();
 	return { success: true, id: info.StringId, name: info.Name } as IDataObject;
+}
+
+/** The content type order of the list. The first entry is the default content type. */
+export async function readContentTypeOrder(list: () => IList): Promise<string[]> {
+	const folder = (await list().rootFolder.select('UniqueContentTypeOrder')()) as {
+		UniqueContentTypeOrder?: Array<{ StringId: string }>;
+	};
+	return folder.UniqueContentTypeOrder?.length
+		? folder.UniqueContentTypeOrder.map((entry) => entry.StringId)
+		: ((await list().contentTypes.select('StringId')()) as Array<{ StringId: string }>).map(
+				(entry) => entry.StringId,
+			);
+}
+
+export async function writeContentTypeOrder(list: () => IList, order: string[]): Promise<void> {
+	await list().rootFolder.update({
+		UniqueContentTypeOrder: {
+			__metadata: { type: 'Collection(SP.ContentTypeId)' },
+			results: order.map((id) => ({ __metadata: { type: 'SP.ContentTypeId' }, StringId: id })),
+		},
+	} as never);
 }
 
 export async function setDefaultContentType(
@@ -237,21 +266,7 @@ export async function setDefaultContentType(
 	const locator = this.getNodeParameter('list', itemIndex) as LocatorValue;
 	const list = () => getListFromLocator(sp, locator);
 
-	const folder = (await list().rootFolder.select('UniqueContentTypeOrder')()) as {
-		UniqueContentTypeOrder?: Array<{ StringId: string }>;
-	};
-	const current = folder.UniqueContentTypeOrder?.length
-		? folder.UniqueContentTypeOrder.map((entry) => entry.StringId)
-		: (
-				(await list().contentTypes.select('StringId')()) as Array<{ StringId: string }>
-			).map((entry) => entry.StringId);
-	const order = buildContentTypeOrder(current, contentTypeId);
-
-	await list().rootFolder.update({
-		UniqueContentTypeOrder: {
-			__metadata: { type: 'Collection(SP.ContentTypeId)' },
-			results: order.map((id) => ({ __metadata: { type: 'SP.ContentTypeId' }, StringId: id })),
-		},
-	} as never);
+	const order = buildContentTypeOrder(await readContentTypeOrder(list), contentTypeId);
+	await writeContentTypeOrder(list, order);
 	return { success: true, defaultContentTypeId: contentTypeId, order } as IDataObject;
 }

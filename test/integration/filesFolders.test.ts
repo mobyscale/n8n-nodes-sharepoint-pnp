@@ -1,10 +1,20 @@
-import type { IDataObject, IExecuteFunctions, INodeExecutionData } from 'n8n-workflow';
+import type {
+	IDataObject,
+	IExecuteFunctions,
+	ILoadOptionsFunctions,
+	INodeExecutionData,
+} from 'n8n-workflow';
 import { sleep } from 'n8n-workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { deleteSourceFolderIfEmpty } from '../../nodes/SharePointPnp/shared/copyJob';
 import { undefinedIfNotFound } from '../../nodes/SharePointPnp/shared/filesFolders';
-import { joinPath, toServerRelativePath } from '../../nodes/SharePointPnp/shared/utils';
+import { searchFiles, searchFileVersions } from '../../nodes/SharePointPnp/methods/listSearchFiles';
+import {
+	getSiteServerRelativeUrl,
+	joinPath,
+	toServerRelativePath,
+} from '../../nodes/SharePointPnp/shared/utils';
 import { SharePointPnp } from '../../nodes/SharePointPnp/SharePointPnp.node';
 import {
 	config,
@@ -23,10 +33,10 @@ function toBinaryItem(buffer: Buffer, fileName: string): INodeExecutionData {
 	};
 }
 
-async function run(
+async function runOutputs(
 	parameters: IDataObject,
 	items: INodeExecutionData[] = [{ json: {} }],
-): Promise<INodeExecutionData[]> {
+): Promise<INodeExecutionData[][]> {
 	const context = createExecuteContext(parameters, items);
 	context.helpers = {
 		...context.helpers,
@@ -38,7 +48,22 @@ async function run(
 			mimeType: 'application/octet-stream',
 		}),
 	} as unknown as IExecuteFunctions['helpers'];
-	return (await new SharePointPnp().execute.call(context))[0];
+	return await new SharePointPnp().execute.call(context);
+}
+
+const run = async (parameters: IDataObject, items?: INodeExecutionData[]) =>
+	(await runOutputs(parameters, items))[0];
+
+/** A list search context with the same credentials and parameters as the execute context. */
+function loadOptionsContext(parameters: IDataObject): ILoadOptionsFunctions {
+	const execute = createExecuteContext(parameters);
+	return {
+		getNode: execute.getNode,
+		getCredentials: execute.getCredentials,
+		helpers: execute.helpers,
+		getNodeParameter: (name: string, fallback?: unknown, options?: { extractValue?: boolean }) =>
+			execute.getNodeParameter(name, 0, fallback, options),
+	} as unknown as ILoadOptionsFunctions;
 }
 
 const file = (operation: string, parameters: IDataObject = {}, items?: INodeExecutionData[]) =>
@@ -58,10 +83,20 @@ const listFiles = (path: string) =>
 		options: {},
 	});
 
+/** Runs Check Exists for one input item. Returns the True and False outputs and the single output item. */
+async function checkExists(paths: string[], combine = 'all') {
+	const [trueItems, falseItems] = await runOutputs({
+		resource: 'fileFolder',
+		operation: 'checkExists',
+		paths: { values: paths.map((path) => ({ path })) },
+		combine,
+	});
+	const item = [...trueItems, ...falseItems][0];
+	return { trueItems, falseItems, item, results: item.json.results as IDataObject[] };
+}
+
 const exists = async (...paths: string[]) =>
-	(await fileFolder('checkExists', { paths: { values: paths.map((path) => ({ path })) } })).map(
-		(item) => item.json.exists,
-	);
+	(await checkExists(paths)).results.map((result) => result.exists);
 
 /** SharePoint answers 400 or 404 when a recycle bin item is already gone. */
 async function ignoreMissing(request: Promise<void>): Promise<void> {
@@ -192,13 +227,53 @@ describe.runIf(hasConfig)('files and folders', () => {
 		).rejects.toThrow();
 	});
 
+	it('uploads into missing folders and sets list item fields', async () => {
+		const uploaded = await file(
+			'upload',
+			{
+				folderPath: locator(at('new', 'deep')),
+				fileName: 'fields.txt',
+				binaryPropertyName: 'data',
+				options: {
+					createMissingFolders: true,
+					fieldsJson: '{"Title": "From JSON"}',
+					fields: { values: [{ name: 'Title', value: 'From entry' }] },
+				},
+			},
+			[toBinaryItem(Buffer.from('fields'), 'fields.txt')],
+		);
+		expect(uploaded[0].json.ServerRelativeUrl).toBe(at('new', 'deep', 'fields.txt'));
+		expect(uploaded[0].json.fields).toEqual({ Title: 'From entry' });
+
+		const info = await file('get', {
+			filePath: locator(at('new', 'deep', 'fields.txt')),
+			options: { includeListItem: true },
+		});
+		expect(info[0].json.Name).toBe('fields.txt');
+		expect((info[0].json.ListItemAllFields as IDataObject).Title).toBe('From entry');
+
+		await expect(
+			file(
+				'upload',
+				{
+					folderPath: locator(at('missing-parent', 'child')),
+					fileName: 'x.txt',
+					binaryPropertyName: 'data',
+					options: {},
+				},
+				[toBinaryItem(Buffer.from('x'), 'x.txt')],
+			),
+		).rejects.toThrow();
+	});
+
 	it('gets a folder', async () => {
 		const result = await folder('get', {
 			folderPath: locator(at('a')),
 			options: { includeListItem: true },
 		});
 		expect(result[0].json.Name).toBe('a');
-		expect(result[0].json.ListItemAllFields).toBeDefined();
+		expect(result[0].json.ItemCount).toBeDefined();
+		expect((result[0].json.ListItemAllFields as IDataObject).Id).toEqual(expect.any(Number));
 
 		const defaults = await folder('get', { folderPath: locator(at('a')), options: {} });
 		expect(defaults[0].json).toMatchObject({ Name: 'a', ServerRelativeUrl: at('a') });
@@ -208,20 +283,41 @@ describe.runIf(hasConfig)('files and folders', () => {
 
 	it('checks which paths exist', async () => {
 		const libraryRoot = toServerRelativePath(config!.siteUrl, config!.libraryPath);
-		const result = await fileFolder('checkExists', {
-			paths: {
-				values: [
-					{ path: at('a', 'upload.txt') },
-					{ path: at('a', 'b') },
-					{ path: at('a', 'missing.txt') },
-					{ path: at('missing-folder', 'deep') },
-					{ path: libraryRoot },
-				],
-			},
-		});
-		expect(result.map((item) => item.json.exists)).toEqual([true, true, false, false, true]);
-		expect(result.map((item) => item.json.type)).toEqual(['file', 'folder', null, null, 'folder']);
-		expect(result[0].json.serverRelativeUrl).toBe(at('a', 'upload.txt'));
+		const { results, item } = await checkExists([
+			at('a', 'upload.txt'),
+			at('a', 'b'),
+			at('a', 'missing.txt'),
+			at('missing-folder', 'deep'),
+			libraryRoot,
+		]);
+		expect(results.map((result) => result.exists)).toEqual([true, true, false, false, true]);
+		expect(results.map((result) => result.type)).toEqual(['file', 'folder', null, null, 'folder']);
+		expect(results[0].serverRelativeUrl).toBe(at('a', 'upload.txt'));
+		expect(item.json).toMatchObject({ allExist: false, anyExists: true, combine: 'all' });
+	});
+
+	it('routes Check Exists to True or False by the Combine option', async () => {
+		const existing = [at('a', 'upload.txt'), at('a', 'b')];
+		const mixed = [at('a', 'upload.txt'), at('a', 'missing.txt')];
+		const missingOnly = [at('a', 'missing.txt'), at('missing-folder')];
+
+		const allExisting = await checkExists(existing, 'all');
+		expect(allExisting.trueItems).toHaveLength(1);
+		expect(allExisting.falseItems).toHaveLength(0);
+		expect(allExisting.item.json).toMatchObject({ exists: true, allExist: true });
+
+		const allMixed = await checkExists(mixed, 'all');
+		expect(allMixed.trueItems).toHaveLength(0);
+		expect(allMixed.falseItems).toHaveLength(1);
+		expect(allMixed.item.pairedItem).toEqual({ item: 0 });
+
+		const anyMixed = await checkExists(mixed, 'any');
+		expect(anyMixed.trueItems).toHaveLength(1);
+		expect(anyMixed.item.json).toMatchObject({ exists: true, allExist: false, anyExists: true });
+
+		const anyMissing = await checkExists(missingOnly, 'any');
+		expect(anyMissing.falseItems).toHaveLength(1);
+		expect(anyMissing.item.json).toMatchObject({ exists: false, anyExists: false });
 	});
 
 	it('gets many entries, recursive or not, with filters', async () => {
@@ -327,6 +423,115 @@ describe.runIf(hasConfig)('files and folders', () => {
 		expect(everything[0].json.fields).toBeDefined();
 	});
 
+	it('gets many entries by depth and with field filters', async () => {
+		for (const [parent, name, title] of [
+			[at('depth'), 'top.txt', 'Draft'],
+			[at('depth', 'A'), 'mid.txt', 'Final'],
+			[at('depth', 'A', 'B'), 'low.txt', 'Draft copy'],
+			[at('depth', 'A', 'B', 'C'), 'deep.txt', ''],
+		]) {
+			await file(
+				'upload',
+				{
+					folderPath: locator(parent),
+					fileName: name,
+					binaryPropertyName: 'data',
+					options: {
+						createMissingFolders: true,
+						...(title ? { fields: { values: [{ name: 'Title', value: title }] } } : {}),
+					},
+				},
+				[toBinaryItem(Buffer.from(name), name)],
+			);
+		}
+		const base = {
+			folderPath: locator(at('depth')),
+			recursive: true,
+			returnAll: true,
+			include: 'all',
+			filters: {},
+		};
+		const getMany = async (parameters: IDataObject) =>
+			(await fileFolder('getAll', { ...base, options: {}, ...parameters })).map(
+				(item) => item.json,
+			);
+		const names = (entries: IDataObject[]) => entries.map((entry) => String(entry.name)).sort();
+
+		const all = await getMany({});
+		expect(Object.fromEntries(all.map((entry) => [entry.name, entry.depth]))).toEqual({
+			'top.txt': 1,
+			A: 1,
+			'mid.txt': 2,
+			B: 2,
+			'low.txt': 3,
+			C: 3,
+			'deep.txt': 4,
+		});
+		expect(names(await getMany({ options: { maxDepth: 2 } }))).toEqual([
+			'A',
+			'B',
+			'mid.txt',
+			'top.txt',
+		]);
+		expect(names(await getMany({ options: { minDepth: 3 } }))).toEqual([
+			'C',
+			'deep.txt',
+			'low.txt',
+		]);
+		expect(names(await getMany({ options: { minDepth: 2, maxDepth: 3 } }))).toEqual([
+			'B',
+			'C',
+			'low.txt',
+			'mid.txt',
+		]);
+		const flat = await getMany({ recursive: false, options: { minDepth: 3 } });
+		expect(names(flat)).toEqual(['A', 'top.txt']);
+		expect(flat[0].depth).toBeUndefined();
+
+		const filtered = async (conditions: IDataObject[], options: IDataObject = {}) =>
+			names(await getMany({ include: 'files', fieldValueFilters: { conditions }, options }));
+		expect(await filtered([{ field: 'Title', operator: 'eq', value: 'Draft' }])).toEqual([
+			'top.txt',
+		]);
+		expect(await filtered([{ field: 'Title', operator: 'contains', value: 'Draft' }])).toEqual([
+			'low.txt',
+			'top.txt',
+		]);
+		expect(await filtered([{ field: 'Title', operator: 'isEmpty' }])).toEqual(['deep.txt']);
+		expect(
+			await filtered(
+				[
+					{ field: 'Title', operator: 'eq', value: 'Final' },
+					{ field: 'Title', operator: 'isEmpty' },
+				],
+				{ fieldFiltersCombine: 'or' },
+			),
+		).toEqual(['deep.txt', 'mid.txt']);
+		expect(
+			await filtered([{ field: 'Title', operator: 'contains', value: 'Draft' }], { minDepth: 2 }),
+		).toEqual(['low.txt']);
+
+		const parent = (await createTestSp()
+			.web.getFolderByServerRelativePath(testFolder)
+			.listItemAllFields.select('ParentList/Id')
+			.expand('ParentList')()) as unknown as { ParentList: { Id: string } };
+		const items = await run({
+			resource: 'listItem',
+			operation: 'getAll',
+			list: locator(parent.ParentList.Id, 'id'),
+			queryMode: 'caml',
+			camlQuery:
+				'<Where><Eq><FieldRef Name="FSObjType"/><Value Type="Integer">0</Value></Eq></Where>',
+			fieldValueFilters: { conditions: [{ field: 'Title', operator: 'contains', value: 'Draft' }] },
+			returnAll: true,
+			getAllOptions: { folderPath: at('depth'), recursive: true },
+		});
+		expect(items.map((item) => String(item.json.FileLeafRef)).sort()).toEqual([
+			'low.txt',
+			'top.txt',
+		]);
+	});
+
 	it('copies, moves and renames a file', async () => {
 		await folder('create', { folderPath: locator(at('target')) });
 		const copied = await file('copy', {
@@ -366,37 +571,48 @@ describe.runIf(hasConfig)('files and folders', () => {
 			newName: 'renamed.txt',
 		});
 		expect(renamed[0].json.Name).toBe('renamed.txt');
-		const old = await fileFolder('checkExists', {
-			paths: {
-				values: [{ path: at('a', 'b', 'copy.txt') }, { path: at('a', 'b', 'renamed.txt') }],
-			},
-		});
-		expect(old.map((item) => item.json.exists)).toEqual([false, true]);
+		expect(await exists(at('a', 'b', 'copy.txt'), at('a', 'b', 'renamed.txt'))).toEqual([
+			false,
+			true,
+		]);
 	});
 
 	describe('publishing', () => {
 		interface LibrarySettings {
 			EnableMinorVersions: boolean;
 			EnableModeration: boolean;
+			ForceCheckout: boolean;
 		}
 
 		async function readSettings(): Promise<LibrarySettings> {
 			const root = toServerRelativePath(config!.siteUrl, config!.libraryPath).toLowerCase();
 			const lists = (await createTestSp()
-				.web.lists.select('EnableMinorVersions', 'EnableModeration', 'RootFolder/ServerRelativeUrl')
+				.web.lists.select(
+					'EnableMinorVersions',
+					'EnableModeration',
+					'ForceCheckout',
+					'RootFolder/ServerRelativeUrl',
+				)
 				.expand('RootFolder')()) as unknown as Array<
 				LibrarySettings & { RootFolder: { ServerRelativeUrl: string } }
 			>;
 			const library = lists.find(
 				(list) => list.RootFolder.ServerRelativeUrl.toLowerCase() === root,
 			);
-			return library ?? { EnableMinorVersions: false, EnableModeration: false };
+			return (
+				library ?? { EnableMinorVersions: false, EnableModeration: false, ForceCheckout: false }
+			);
 		}
 
 		async function createFile(name: string): Promise<string> {
 			await file(
 				'upload',
-				{ folderPath: locator(testFolder), fileName: name, binaryPropertyName: 'data', options: {} },
+				{
+					folderPath: locator(testFolder),
+					fileName: name,
+					binaryPropertyName: 'data',
+					options: {},
+				},
 				[toBinaryItem(Buffer.from(name), name)],
 			);
 			return at(name);
@@ -439,6 +655,35 @@ describe.runIf(hasConfig)('files and folders', () => {
 			if (settings.EnableMinorVersions) await run('publish', path);
 			const denied = await run('deny', path);
 			expect(denied[0].json.moderationStatus).toBe(1);
+		});
+
+		it('checks in and publishes after an upload only when it applies', async () => {
+			const settings = await readSettings();
+			const uploaded = await file(
+				'upload',
+				{
+					folderPath: locator(testFolder),
+					fileName: 'upload-publish.txt',
+					binaryPropertyName: 'data',
+					options: {
+						checkIn: true,
+						checkInComment: 'integration test',
+						checkInType: 'minor',
+						publish: true,
+						publishComment: 'integration test',
+					},
+				},
+				[toBinaryItem(Buffer.from('publish'), 'upload-publish.txt')],
+			);
+			const json = uploaded[0].json;
+			expect(json.checkedIn).toBe(settings.ForceCheckout);
+			expect(json.CheckOutType).toBe(2);
+			if (settings.EnableMinorVersions && !settings.EnableModeration) {
+				expect(json.published).toBe(true);
+				expect(json.Level).toBe(1);
+			} else if (!settings.EnableMinorVersions) {
+				expect(json.published).toBe(false);
+			}
 		});
 
 		it('returns the SharePoint error when the library does not support the operation', async (context) => {
@@ -494,11 +739,25 @@ describe.runIf(hasConfig)('files and folders', () => {
 		expect(withCreator[0].json.CreatedBy).toBeDefined();
 		const label = String(versions[0].json.VersionLabel);
 
+		const picker = await searchFileVersions.call(loadOptionsContext({ filePath: locator(path) }));
+		expect(picker.results.map((result) => result.value)).toContain(label);
+
 		const restored = await file('restoreVersion', {
 			filePath: locator(path),
-			versionLabel: label,
+			versionLabel: locator(label, 'list'),
 		});
 		expect(restored[0].json.restoredVersionLabel).toBe(label);
+	});
+
+	it('lists folders and files in the file picker', async () => {
+		const siteRoot = getSiteServerRelativeUrl(config!.siteUrl);
+		const folderText = at('a').slice(siteRoot === '/' ? 1 : siteRoot.length + 1);
+		const result = await searchFiles.call(loadOptionsContext({}), `${folderText}/`);
+		const names = result.results.map((entry) => entry.name);
+		expect(names).toContain(`${folderText}/b/`);
+		expect(names).toContain(`${folderText}/upload.txt`);
+		const filtered = await searchFiles.call(loadOptionsContext({}), `${folderText}/up`);
+		expect(filtered.results.map((entry) => entry.value)).toEqual([at('a', 'upload.txt')]);
 	});
 
 	it('copies and moves a folder directly', async () => {
@@ -591,17 +850,9 @@ describe.runIf(hasConfig)('files and folders', () => {
 		});
 		expect(folderPermanent[0].json.permanent).toBe(true);
 
-		const result = await fileFolder('checkExists', {
-			paths: {
-				values: [
-					{ path: at('a', 'b', 'renamed.txt') },
-					{ path: at('a', 'upload.txt') },
-					{ path: at('target') },
-					{ path: at('many') },
-				],
-			},
-		});
-		expect(result.map((item) => item.json.exists)).toEqual([false, false, false, false]);
+		expect(
+			await exists(at('a', 'b', 'renamed.txt'), at('a', 'upload.txt'), at('target'), at('many')),
+		).toEqual([false, false, false, false]);
 	});
 
 	describe('copy jobs', () => {
@@ -799,11 +1050,12 @@ describe.runIf(hasConfig)('files and folders', () => {
 	});
 
 	it('checks one path for each input item', async () => {
-		const result = await run(
+		const [result, falseItems] = await runOutputs(
 			{ resource: 'fileFolder', operation: 'checkExists', paths: { values: [{ path: at('a') }] } },
 			[{ json: {} }, { json: {} }],
 		);
 		expect(result).toHaveLength(2);
+		expect(falseItems).toHaveLength(0);
 		expect(result.map((item) => item.pairedItem)).toEqual([{ item: 0 }, { item: 1 }]);
 	});
 });

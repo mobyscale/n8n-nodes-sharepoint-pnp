@@ -45,13 +45,13 @@ const scopeProperty: INodeProperties = {
 };
 
 const idsProperty = (operationDescription: string): INodeProperties => ({
-	displayName: 'Item IDs',
+	displayName: 'Item Names or IDs',
 	name: 'ids',
-	type: 'string',
+	type: 'multiOptions',
 	required: true,
-	default: '',
-	placeholder: '00000000-0000-0000-0000-000000000000',
-	description: `${operationDescription}. Use a comma-separated list, or an expression that returns an array.`,
+	typeOptions: { loadOptionsMethod: 'getRecycleBinItemOptions', loadOptionsDependsOn: ['scope'] },
+	default: [],
+	description: `${operationDescription}. The list shows the 200 newest items. An expression can return an array or a comma-separated list. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.`,
 	displayOptions: show(['restore', 'deletePermanently', 'moveToSecondStage']),
 });
 

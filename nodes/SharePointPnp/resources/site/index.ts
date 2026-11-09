@@ -5,6 +5,7 @@ import { spGet, SPQueryable, spPost, type SPFI } from '@pnp/sp/index.js';
 import '@pnp/sp/hubsites/index.js';
 import type { ISite } from '@pnp/sp/sites/index.js';
 
+import { userRLC } from '../../shared/securables';
 import {
 	applySelection,
 	selectionOptions,
@@ -26,6 +27,7 @@ import {
 	SITE_STATUS_NAMES,
 	type NewSiteType,
 } from './helpers';
+import { locatorValue } from '../../shared/pickers';
 
 type CreateSiteProps = Parameters<ISite['createCommunicationSiteFromProps']>[0];
 
@@ -230,13 +232,13 @@ const description: INodeProperties[] = [
 	},
 
 	{
-		displayName: 'Property Keys',
+		displayName: 'Property Key Names or IDs',
 		name: 'propertyKeys',
-		type: 'string',
-		default: '',
-		placeholder: 'e.g. vti_title, MyKey',
+		type: 'multiOptions',
+		typeOptions: { loadOptionsMethod: 'getPropertyBagKeyOptions' },
+		default: [],
 		description:
-			'Comma-separated keys to return. Empty returns all values. Keys are not case-sensitive.',
+			'The keys to return. Empty returns all values. Keys are not case-sensitive. An expression can return a comma-separated list. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 		displayOptions: show(['getPropertyBag']),
 	},
 	{
@@ -258,9 +260,18 @@ const description: INodeProperties[] = [
 					{
 						displayName: 'Key',
 						name: 'key',
-						type: 'string',
-						default: '',
-						description: 'The property bag key',
+						type: 'resourceLocator',
+						default: { mode: 'list', value: '' },
+						description: 'The property bag key. A key that does not exist yet is created.',
+						modes: [
+							{
+								displayName: 'From List',
+								name: 'list',
+								type: 'list',
+								typeOptions: { searchListMethod: 'searchPropertyBagKeys', searchable: true },
+							},
+							{ displayName: 'By Name', name: 'name', type: 'string', placeholder: 'MyKey' },
+						],
 					},
 					{
 						displayName: 'Value',
@@ -337,36 +348,39 @@ const description: INodeProperties[] = [
 				description: 'The description of the site',
 			},
 			{
-				displayName: 'Hub Site ID',
+				displayName: 'Hub Site Name or ID',
 				name: 'hubSiteId',
-				type: 'string',
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getHubSiteOptions' },
 				default: '',
-				description: 'The ID of a hub site to join when the site is ready',
+				description:
+					'The hub site to join when the site is ready. Empty joins no hub site. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 			},
 			{
-				displayName: 'Language (LCID)',
+				displayName: 'Language Name or ID',
 				name: 'language',
-				type: 'number',
-				typeOptions: { minValue: 1 },
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getInstalledLanguageOptions' },
 				default: 1033,
-				description: 'The language ID of the site. 1033 is English (United States).',
+				description:
+					'The language of the site. 1033 is English (United States). Choose from the list, or specify an LCID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 			},
 			{
+				...userRLC,
 				displayName: 'Owner',
 				name: 'owner',
-				type: 'string',
-				default: '',
-				placeholder: 'user@contoso.com',
+				required: false,
 				description:
-					'The user principal name of the site owner. SharePoint needs it when the node uses app-only (certificate) authentication.',
+					'The site owner. SharePoint needs it when the node uses app-only (certificate) authentication. Pick a user, or type an email address (user principal name).',
 			},
 			{
-				displayName: 'Site Design ID',
+				displayName: 'Site Design Name or ID',
 				name: 'siteDesignId',
-				type: 'string',
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getSiteDesignOptions' },
 				default: '',
 				description:
-					'The ID of a site design. Communication site designs: Topic 00000000-0000-0000-0000-000000000000, Showcase 6142d2a0-63a5-4ba0-aede-d9fefca2c767, Blank f6cc5403-0d63-442e-96c0-285923709ffc. Empty uses the default.',
+					'The site design to apply. Empty uses the default. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 			},
 			{
 				displayName: 'Wait Timeout (Seconds)',
@@ -401,7 +415,7 @@ const description: INodeProperties[] = [
 		type: 'string',
 		default: '',
 		required: true,
-		placeholder: 'project-a',
+		placeholder: 'team-a',
 		description: 'The last part of the subsite URL, below the selected site',
 		displayOptions: show(['createSubsite']),
 	},
@@ -430,12 +444,13 @@ const description: INodeProperties[] = [
 				description: 'The description of the subsite',
 			},
 			{
-				displayName: 'Language (LCID)',
+				displayName: 'Language Name or ID',
 				name: 'language',
-				type: 'number',
-				typeOptions: { minValue: 1 },
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getInstalledLanguageOptions' },
 				default: 1033,
-				description: 'The language ID of the subsite',
+				description:
+					'The language of the subsite. Choose from the list, or specify an LCID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 			},
 			{
 				displayName: 'Use Same Permissions as Parent Site',
@@ -450,11 +465,25 @@ const description: INodeProperties[] = [
 	{
 		displayName: 'Site to Check',
 		name: 'statusSiteUrl',
-		type: 'string',
-		default: '',
+		type: 'resourceLocator',
+		default: { mode: 'list', value: '' },
 		required: true,
-		placeholder: 'https://contoso.sharepoint.com/sites/Example',
-		description: 'The URL of the site to check. A server-relative path or the site name also works.',
+		description: 'The site to check. A new site can be missing from the list. Use a URL then.',
+		modes: [
+			{
+				displayName: 'From List',
+				name: 'list',
+				type: 'list',
+				typeOptions: { searchListMethod: 'searchSites', searchable: true },
+			},
+			{
+				displayName: 'By URL',
+				name: 'url',
+				type: 'string',
+				placeholder: 'https://contoso.sharepoint.com/sites/Example',
+				hint: 'An absolute URL, a server-relative path or the site name',
+			},
+		],
 		displayOptions: show(['getSiteCreationStatus']),
 	},
 
@@ -465,7 +494,8 @@ const description: INodeProperties[] = [
 		typeOptions: { loadOptionsMethod: 'getHubSiteOptions' },
 		default: '',
 		required: true,
-		description: 'The hub site to join. This needs site collection admin rights. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+		description:
+			'The hub site to join. This needs site collection admin rights. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 		displayOptions: show(['joinHubSite']),
 	},
 ];
@@ -540,7 +570,7 @@ async function getHubSites(this: IExecuteFunctions, { sp, itemIndex }: Operation
 }
 
 async function getPropertyBag(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
-	const keys = toList(this.getNodeParameter('propertyKeys', itemIndex, '') as string);
+	const keys = toList(this.getNodeParameter('propertyKeys', itemIndex, '') as string | string[]);
 	const raw = (await sp.web.allProperties()) as Record<string, unknown>;
 	const { properties, missingKeys } = pickPropertyBagKeys(cleanPropertyBag(raw), keys);
 	return keys.length ? { properties, missingKeys } : { properties };
@@ -548,9 +578,11 @@ async function getPropertyBag(this: IExecuteFunctions, { sp, itemIndex }: Operat
 
 async function setPropertyBag(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
 	const collection = this.getNodeParameter('propertyValues', itemIndex, {}) as {
-		values?: Array<{ key: string; value: string }>;
+		values?: Array<{ key: unknown; value: string }>;
 	};
-	const entries = (collection.values ?? []).filter((entry) => entry.key.trim());
+	const entries = (collection.values ?? [])
+		.map((entry) => ({ key: locatorValue(entry.key), value: entry.value }))
+		.filter((entry) => entry.key);
 	if (!entries.length) {
 		throw new NodeOperationError(this.getNode(), 'Add at least one property bag value', {
 			itemIndex,
@@ -581,7 +613,7 @@ async function createSite(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: O
 		description?: string;
 		hubSiteId?: string;
 		language?: number;
-		owner?: string;
+		owner?: unknown;
 		shareByEmailEnabled?: boolean;
 		siteDesignId?: string;
 		waitUntilReady?: boolean;
@@ -593,6 +625,7 @@ async function createSite(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: O
 		title: getRequiredString.call(this, 'siteTitle', itemIndex),
 		url: getRequiredString.call(this, 'newSiteUrl', itemIndex),
 		...options,
+		owner: locatorValue(options.owner),
 	});
 
 	let response = (await sp.site.createCommunicationSiteFromProps(
@@ -607,9 +640,13 @@ async function createSite(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: O
 		}
 	}
 	if (response.SiteStatus === 3) {
-		throw new NodeOperationError(this.getNode(), `SharePoint could not create the site ${request.Url}`, {
-			itemIndex,
-		});
+		throw new NodeOperationError(
+			this.getNode(),
+			`SharePoint could not create the site ${request.Url}`,
+			{
+				itemIndex,
+			},
+		);
 	}
 	return { ...withStatusName(response), RequestedUrl: request.Url };
 }
@@ -625,20 +662,31 @@ async function createSubsite(this: IExecuteFunctions, { sp, itemIndex }: Operati
 		getRequiredString.call(this, 'subsiteUrl', itemIndex).replace(/^\/+|\/+$/g, ''),
 		options.description ?? '',
 		this.getNodeParameter('subsiteTemplate', itemIndex) as string,
-		options.language ?? 1033,
+		Number(options.language ?? 1033),
 		options.inheritPermissions !== false,
 	);
 	return created as unknown as IDataObject;
+}
+
+function getStatusSite(this: IExecuteFunctions, itemIndex: number): string {
+	const value = locatorValue(this.getNodeParameter('statusSiteUrl', itemIndex, ''));
+	if (!value) {
+		throw new NodeOperationError(
+			this.getNode(),
+			'The parameter "statusSiteUrl" must not be empty',
+			{
+				itemIndex,
+			},
+		);
+	}
+	return value;
 }
 
 async function getSiteCreationStatus(
 	this: IExecuteFunctions,
 	{ sp, siteUrl, itemIndex }: OperationContext,
 ) {
-	const target = resolveNewSiteUrl(
-		await getTenantUrl(this),
-		getRequiredString.call(this, 'statusSiteUrl', itemIndex),
-	);
+	const target = resolveNewSiteUrl(await getTenantUrl(this), getStatusSite.call(this, itemIndex));
 	return withStatusName(await fetchSiteStatus(sp, siteUrl, target));
 }
 

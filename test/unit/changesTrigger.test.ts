@@ -160,6 +160,51 @@ describe('SharePointPnpTrigger.poll', () => {
 		expect(staticData.changeToken).toBe('next-token');
 	});
 
+	it('passes the filter options to the change query', async () => {
+		const staticData: IDataObject = { changeToken: 'saved' };
+		await poll(createContext({}, staticData));
+		const fieldFilters = { filter: [{ field: 'Status', operator: 'equals', value: 'Open' }] };
+		runWithExpiry.mockResolvedValueOnce({
+			tokenExpired: false,
+			changes: [],
+			nextChangeToken: undefined,
+			hasMore: false,
+		});
+
+		await poll(
+			createContext(
+				{
+					options: { changeMaxDepth: 2, excludeEditors: 'Robot', changeFieldFilters: fieldFilters },
+				},
+				staticData,
+			),
+		);
+
+		const [, , , options] = runWithExpiry.mock.calls[0];
+		expect(options).toMatchObject({ maxDepth: 2, excludeEditors: 'Robot', fieldFilters });
+	});
+
+	it('has the filter options, but not Item Kind, because the events set the kinds', () => {
+		const names = (original.triggerOptionsProperty.options as Array<{ name: string }>).map(
+			(option) => option.name,
+		);
+		expect(names).toEqual(
+			expect.arrayContaining(['changeMaxDepth', 'excludeEditors', 'changeFieldFilters']),
+		);
+		expect(names).not.toContain('changeItemKinds');
+		const changeNames = (original.changeOptionsProperty.options as Array<{ name: string }>).map(
+			(option) => option.name,
+		);
+		expect(changeNames).toEqual(
+			expect.arrayContaining([
+				'changeItemKinds',
+				'changeMaxDepth',
+				'excludeEditors',
+				'changeFieldFilters',
+			]),
+		);
+	});
+
 	it('starts again when the scope changes', async () => {
 		const staticData: IDataObject = { changeToken: 'old-token', scopeKey: 'another scope' };
 		expect(await poll(createContext({}, staticData))).toBeNull();

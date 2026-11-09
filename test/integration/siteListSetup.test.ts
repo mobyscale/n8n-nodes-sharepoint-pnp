@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { toServerRelativePath } from '../../nodes/SharePointPnp/shared/utils';
-import { config, hasConfig, locator, runNode } from './harness';
+import { config, hasConfig, locator, runNode, itWrite } from './harness';
 
 /**
  * Only read operations run in this file. Every operation that adds, changes or deletes site, list,
@@ -132,7 +132,7 @@ describe.runIf(hasConfig)('site and list setup (read only)', () => {
 describe.runIf(hasConfig)('site and list setup (write, skipped on the production site)', () => {
 	const listParams = () => ({ list: locator('00000000-0000-0000-0000-000000000000', 'id') });
 
-	it.skip('sets and reads a property bag value (changes the site)', async () => {
+	itWrite('sets and reads a property bag value (changes the site)', async () => {
 		await runNode({
 			resource: 'site',
 			operation: 'setPropertyBag',
@@ -151,7 +151,7 @@ describe.runIf(hasConfig)('site and list setup (write, skipped on the production
 		});
 	});
 
-	it.skip('creates a Communication site (creates a site)', async () => {
+	itWrite('creates a Communication site (creates a site)', async () => {
 		const [result] = await runNode({
 			resource: 'site',
 			operation: 'createSite',
@@ -163,7 +163,7 @@ describe.runIf(hasConfig)('site and list setup (write, skipped on the production
 		expect(result.json.SiteStatusName).toBe('Ready');
 	});
 
-	it.skip('creates a Team site without a group (creates a site)', async () => {
+	itWrite('creates a Team site without a group (creates a site)', async () => {
 		const [result] = await runNode({
 			resource: 'site',
 			operation: 'createSite',
@@ -175,7 +175,7 @@ describe.runIf(hasConfig)('site and list setup (write, skipped on the production
 		expect(result.json.SiteStatusName).toBe('Ready');
 	});
 
-	it.skip('creates a subsite (creates a subsite)', async () => {
+	itWrite('creates a subsite (creates a subsite)', async () => {
 		const [result] = await runNode({
 			resource: 'site',
 			operation: 'createSubsite',
@@ -186,7 +186,7 @@ describe.runIf(hasConfig)('site and list setup (write, skipped on the production
 		expect(result.json).toHaveProperty('Url');
 	});
 
-	it.skip('joins and leaves a hub site (changes the hub association of the site)', async () => {
+	itWrite('joins and leaves a hub site (changes the hub association of the site)', async () => {
 		const hubs = await runNode({ resource: 'site', operation: 'getHubSites', returnAll: true });
 		const hubSiteId = String(hubs[0].json.SiteId);
 		const [joined] = await runNode({ resource: 'site', operation: 'joinHubSite', hubSiteId });
@@ -195,7 +195,7 @@ describe.runIf(hasConfig)('site and list setup (write, skipped on the production
 		expect(left.json.HubSiteId).toBe('00000000-0000-0000-0000-000000000000');
 	});
 
-	it.skip('updates the settings of a list (changes a list)', async () => {
+	itWrite('updates the settings of a list (changes a list)', async () => {
 		const [result] = await runNode({
 			resource: 'list',
 			operation: 'update',
@@ -213,7 +213,7 @@ describe.runIf(hasConfig)('site and list setup (write, skipped on the production
 		expect(result.json.MajorVersionLimit).toBe(20);
 	});
 
-	it.skip('creates, updates and deletes a field in a list (changes the list schema)', async () => {
+	itWrite('creates, updates and deletes a field in a list (changes the list schema)', async () => {
 		const [created] = await runNode({
 			resource: 'list',
 			operation: 'createField',
@@ -246,41 +246,44 @@ describe.runIf(hasConfig)('site and list setup (write, skipped on the production
 		expect(deleted.json.success).toBe(true);
 	});
 
-	it.skip('creates and deletes a lookup field and a field from schema XML (changes the list schema)', async () => {
-		await runNode({
-			resource: 'list',
-			operation: 'createField',
-			target: 'list',
-			...listParams(),
-			fieldType: 'lookup',
-			displayName: 'PnP Test Lookup',
-			lookupList: locator('00000000-0000-0000-0000-000000000000', 'id'),
-			lookupField: 'Title',
-			lookupAllowMultiple: false,
-			commonSettings: { internalName: 'PnPTestLookup' },
-		});
-		await runNode({
-			resource: 'list',
-			operation: 'createField',
-			target: 'list',
-			...listParams(),
-			fieldType: 'schemaXml',
-			schemaXml:
-				'<Field Type="Text" DisplayName="PnP Test Xml" Name="PnPTestXml" StaticName="PnPTestXml" />',
-			commonSettings: { addToDefaultView: false },
-		});
-		for (const field of ['PnPTestLookup', 'PnPTestXml']) {
+	itWrite(
+		'creates and deletes a lookup field and a field from schema XML (changes the list schema)',
+		async () => {
 			await runNode({
 				resource: 'list',
-				operation: 'deleteField',
+				operation: 'createField',
 				target: 'list',
 				...listParams(),
-				field,
+				fieldType: 'lookup',
+				displayName: 'PnP Test Lookup',
+				lookupList: locator('00000000-0000-0000-0000-000000000000', 'id'),
+				lookupField: 'Title',
+				lookupAllowMultiple: false,
+				commonSettings: { internalName: 'PnPTestLookup' },
 			});
-		}
-	});
+			await runNode({
+				resource: 'list',
+				operation: 'createField',
+				target: 'list',
+				...listParams(),
+				fieldType: 'schemaXml',
+				schemaXml:
+					'<Field Type="Text" DisplayName="PnP Test Xml" Name="PnPTestXml" StaticName="PnPTestXml" />',
+				commonSettings: { addToDefaultView: false },
+			});
+			for (const field of ['PnPTestLookup', 'PnPTestXml']) {
+				await runNode({
+					resource: 'list',
+					operation: 'deleteField',
+					target: 'list',
+					...listParams(),
+					field,
+				});
+			}
+		},
+	);
 
-	it.skip('creates and deletes a field in the site (changes the site schema)', async () => {
+	itWrite('creates and deletes a field in the site (changes the site schema)', async () => {
 		const [created] = await runNode({
 			resource: 'list',
 			operation: 'createField',
@@ -298,7 +301,7 @@ describe.runIf(hasConfig)('site and list setup (write, skipped on the production
 		});
 	});
 
-	it.skip('adds, defaults and removes a content type of a list (changes the list)', async () => {
+	itWrite('adds, defaults and removes a content type of a list (changes the list)', async () => {
 		const siteTypes = await runNode({
 			resource: 'list',
 			operation: 'getContentTypes',

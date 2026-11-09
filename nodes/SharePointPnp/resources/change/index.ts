@@ -156,7 +156,14 @@ async function getAll(this: IExecuteFunctions, context: OperationContext) {
 	const returnAll = this.getNodeParameter('returnAll', itemIndex) as boolean;
 	const limit = returnAll ? undefined : (this.getNodeParameter('limit', itemIndex) as number);
 	const queryOptions = this.getNodeParameter('queryOptions', itemIndex, {}) as QueryOptions;
-	const options = this.getNodeParameter('options', itemIndex, {}) as ChangeOutputOptions & {
+	const options = this.getNodeParameter('options', itemIndex, {}) as Pick<
+		ChangeOutputOptions,
+		'includeItemDetails' | 'itemFields' | 'resolveDeletedItems' | 'excludeEditors'
+	> & {
+		changeFieldFilters?: unknown;
+		changeItemKinds?: string[];
+		changeMaxDepth?: number;
+		folderPathFilter?: unknown;
 		onExpiredToken?: ExpiredTokenMode;
 		output?: string;
 	};
@@ -182,7 +189,14 @@ async function getAll(this: IExecuteFunctions, context: OperationContext) {
 
 	const query = buildChangeQuery({ objectTypes, changeTypes, startToken, queryOptions });
 	const result = await runChangeQueryWithExpiry(sp, target, query, {
-		...options,
+		includeItemDetails: options.includeItemDetails,
+		itemFields: options.itemFields,
+		resolveDeletedItems: options.resolveDeletedItems,
+		onExpiredToken: options.onExpiredToken,
+		itemKinds: options.changeItemKinds,
+		maxDepth: options.changeMaxDepth,
+		excludeEditors: options.excludeEditors,
+		fieldFilters: options.changeFieldFilters,
 		folderPathFilter,
 		returnAll,
 		limit,

@@ -2,13 +2,10 @@ import type { ILoadOptionsFunctions, INodePropertyOptions } from 'n8n-workflow';
 
 import '@pnp/sp/hubsites/index.js';
 import { getListFromLocator, getSiteUrl } from '../shared/descriptions';
+import { sortAndCap } from '../shared/paging';
 import { createSp } from '../transport';
 
 type FieldRow = { InternalName: string; Title: string };
-
-function sortByName(options: INodePropertyOptions[]): INodePropertyOptions[] {
-	return options.sort((a, b) => a.name.localeCompare(b.name));
-}
 
 function readList(ctx: ILoadOptionsFunctions): { mode: string; value: string } {
 	return ctx.getNodeParameter('list') as { mode: string; value: string };
@@ -24,7 +21,7 @@ export async function getTargetFieldOptions(
 	const rows = (await fields
 		.filter('Hidden eq false')
 		.select('InternalName', 'Title')()) as FieldRow[];
-	return sortByName(
+	return sortAndCap(
 		rows.map((field) => ({
 			name: `${field.Title} (${field.InternalName})`,
 			value: field.InternalName,
@@ -44,7 +41,7 @@ export async function getSiteContentTypeOptions(
 		Name: string;
 		Group: string;
 	}>;
-	return sortByName(
+	return sortAndCap(
 		types.map((type) => ({ name: `${type.Name} (${type.Group})`, value: type.StringId })),
 	);
 }
@@ -58,7 +55,7 @@ export async function getListContentTypeOptions(
 		'StringId',
 		'Name',
 	)()) as Array<{ StringId: string; Name: string }>;
-	return sortByName(types.map((type) => ({ name: type.Name, value: type.StringId })));
+	return sortAndCap(types.map((type) => ({ name: type.Name, value: type.StringId })));
 }
 
 /** Hub sites of the tenant. The value is the ID of the hub site. */
@@ -71,7 +68,7 @@ export async function getHubSiteOptions(
 		Title: string;
 		SiteUrl: string;
 	}>;
-	return sortByName(
+	return sortAndCap(
 		hubs.map((hub) => ({ name: hub.Title, value: hub.SiteId, description: hub.SiteUrl })),
 	);
 }
