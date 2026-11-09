@@ -42,7 +42,7 @@ export class SharePointPnpTrigger implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'SharePoint PnP Trigger',
 		name: 'sharePointPnpTrigger',
-		icon: { light: 'file:sharepoint.svg', dark: 'file:sharepoint.svg' },
+		icon: { light: 'file:sharepoint-pnp.svg', dark: 'file:sharepoint-pnp.svg' },
 		group: ['trigger'],
 		version: 1,
 		subtitle: '={{$parameter["events"].join(", ")}}',

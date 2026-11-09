@@ -7,7 +7,7 @@ export class SharePointPnpOAuth2Api implements ICredentialType {
 
 	displayName = 'SharePoint PnP OAuth2 API';
 
-	icon: Icon = { light: 'file:icons/sharepoint.svg', dark: 'file:icons/sharepoint.svg' };
+	icon: Icon = { light: 'file:icons/sharepoint-pnp.svg', dark: 'file:icons/sharepoint-pnp.svg' };
 
 	documentationUrl = 'https://github.com/octanesoftware/n8n-nodes-sharepoint-pnp#oauth2-delegated';
 

@@ -23,7 +23,7 @@ export class SharePointPnp implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'SharePoint PnP',
 		name: 'sharePointPnp',
-		icon: { light: 'file:sharepoint.svg', dark: 'file:sharepoint.svg' },
+		icon: { light: 'file:sharepoint-pnp.svg', dark: 'file:sharepoint-pnp.svg' },
 		group: ['transform'],
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
