@@ -1,23 +1,45 @@
 import type { IDataObject, IExecuteFunctions, INodeProperties } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 import type { SPFI } from '@pnp/sp/index.js';
+import type { IList } from '@pnp/sp/lists/index.js';
 
 import { getCopyJobStatus, getJobInfoParameter } from '../../shared/copyJob';
 import { getPath, pathRLC } from '../../shared/descriptions';
 import {
+	buildCamlFilter,
+	fieldFiltersCombineOption,
+	fieldFiltersProperty,
+	loadFilterFieldTypes,
+	readCombine,
+	readFieldFilters,
+} from '../../shared/fieldFilters';
+import {
 	buildViewXml,
 	findOwningList,
+	folderExists,
+	getListRoots,
 	hasExtension,
 	normalizeRow,
 	parseExtensions,
 	type FileFolderFilters,
+	type ListRoot,
 	VIEW_FIELDS,
 	undefinedIfNotFound,
 	type IncludeKind,
 } from '../../shared/filesFolders';
 import { selectionOptions, toList, type SelectionValues } from '../../shared/selection';
-import { toServerRelativePath } from '../../shared/utils';
+import { toNodeError, toServerRelativePath } from '../../shared/utils';
 import type { OperationContext, ResourceModule } from '../types';
+import {
+	compareTrees,
+	parsePatterns,
+	readTree,
+	type CompareInclude,
+	type FolderReader,
+	type TreeEntry,
+	type TreeOptions,
+} from './compare';
+import { toDepthRange, walkFolders, type DepthRange } from './walk';
 
 const show = (operation: string[]) => ({ show: { resource: ['fileFolder'], operation } });
 
@@ -25,13 +47,43 @@ const OUTPUT_PROPERTIES =
 	'name, type, serverRelativeUrl, uniqueId, listItemId, size, created, modified, author, editor';
 
 /** Get Many reads list item fields, so the options use field names and have no Expand. */
-const getAllSelectionOptions = (): INodeProperties[] => {
+const getAllOptions = (): INodeProperties[] => {
 	const [additional, , returnAll] = selectionOptions(VIEW_FIELDS);
+	const recursiveOnly = { show: { '/recursive': [true] } };
 	return [
 		{
 			...additional,
 			placeholder: 'e.g. ContentTypeId, Title',
 			description: `Comma-separated internal names of list item fields to add to "fields" of each entry. Each entry always has the default properties (${OUTPUT_PROPERTIES}).`,
+		},
+		fieldFiltersCombineOption,
+		{
+			displayName: 'Include List Item Fields',
+			name: 'includeListItem',
+			type: 'boolean',
+			default: false,
+			description:
+				'Whether to add all list item fields of each entry in "fields". Same as Return All Properties. Kept for older workflows.',
+		},
+		{
+			displayName: 'Max Depth',
+			name: 'maxDepth',
+			type: 'number',
+			typeOptions: { minValue: 0 },
+			default: 0,
+			description:
+				'The deepest folder level to return. The direct children of the folder are level 1. Folders below this level are not read. 0 means no limit.',
+			displayOptions: recursiveOnly,
+		},
+		{
+			displayName: 'Min Depth',
+			name: 'minDepth',
+			type: 'number',
+			typeOptions: { minValue: 1 },
+			default: 1,
+			description:
+				'The first folder level to return. The direct children of the folder are level 1. The node still reads the levels above it to find the deeper entries.',
+			displayOptions: recursiveOnly,
 		},
 		{
 			...returnAll,
@@ -54,6 +106,13 @@ const description: INodeProperties[] = [
 				value: 'checkExists',
 				description: 'Check if files or folders exist',
 				action: 'Check if files or folders exist',
+			},
+			{
+				name: 'Compare Structure',
+				value: 'compareStructure',
+				description:
+					'Compare the folders and files of a source folder, such as a template, with a target folder',
+				action: 'Compare the structure of two folders',
 			},
 			{
 				name: 'Get Copy Job Status',
@@ -79,7 +138,8 @@ const description: INodeProperties[] = [
 		name: 'recursive',
 		type: 'boolean',
 		default: false,
-		description: 'Whether to also return the content of all subfolders',
+		description:
+			'Whether to also return the content of all subfolders. Each entry then has a "depth" property: 1 for the direct children of the folder.',
 		displayOptions: show(['getAll']),
 	},
 	{
@@ -149,6 +209,13 @@ const description: INodeProperties[] = [
 			},
 		],
 	},
+	fieldFiltersProperty({
+		loadOptionsMethod: 'getFolderListFieldOptions',
+		loadOptionsDependsOn: ['folderPath.value'],
+		displayOptions: show(['getAll']),
+		description:
+			'Conditions on list item fields, for example Title or Status. Each folder is queried on its own, so the filters stay below the list view threshold when a folder has 5000 items or less.',
+	}),
 	{
 		displayName: 'Options',
 		name: 'options',
@@ -156,17 +223,7 @@ const description: INodeProperties[] = [
 		placeholder: 'Add Option',
 		default: {},
 		displayOptions: show(['getAll']),
-		options: [
-			...getAllSelectionOptions(),
-			{
-				displayName: 'Include List Item Fields',
-				name: 'includeListItem',
-				type: 'boolean',
-				default: false,
-				description:
-					'Whether to add all list item fields of each entry in "fields". Same as Return All Properties. Kept for older workflows.',
-			},
-		],
+		options: getAllOptions(),
 	},
 	{
 		displayName: 'Job Info',
@@ -175,7 +232,7 @@ const description: INodeProperties[] = [
 		required: true,
 		default: '={{ $json }}',
 		description:
-			'The job info that a Copy Job copy or move returned. An object with "jobId", "jobQueueUri" and "encryptionKey". By default, the fields of the input item are used. SharePoint returns each job log entry once, so the summary and the messages show only the entries that are new since the last check.',
+			'The job info (jobId, jobQueueUri, encryptionKey) that a Copy Job copy or move returned. By default, the input item is used.',
 		displayOptions: show(['getCopyJobStatus']),
 	},
 	{
@@ -186,7 +243,7 @@ const description: INodeProperties[] = [
 		placeholder: 'Add Path',
 		default: { values: [{ path: '' }] },
 		description:
-			'The paths to check. Each path can be site-relative, server-relative or an absolute URL. You can also put many paths in one field, one on each line.',
+			'The paths to check. Each path can be site-relative, server-relative or an absolute URL. You can also put many paths in one field, one on each line. The node has a True and a False output.',
 		displayOptions: show(['checkExists']),
 		options: [
 			{
@@ -204,25 +261,130 @@ const description: INodeProperties[] = [
 			},
 		],
 	},
+	{
+		displayName: 'Combine',
+		name: 'combine',
+		type: 'options',
+		default: 'all',
+		description: 'When the input item goes to the True output',
+		options: [
+			{
+				name: 'All',
+				value: 'all',
+				description: 'All paths must exist (AND)',
+			},
+			{
+				name: 'Any',
+				value: 'any',
+				description: 'At least one path must exist (OR)',
+			},
+		],
+		displayOptions: show(['checkExists']),
+	},
+	{
+		...pathRLC({
+			displayName: 'Source Folder',
+			name: 'sourceFolder',
+			description:
+				'The folder with the expected structure, for example a template folder. Give a server-relative path, a site-relative path or an absolute URL.',
+		}),
+		displayOptions: show(['compareStructure']),
+	},
+	{
+		...pathRLC({
+			displayName: 'Target Folder',
+			name: 'targetFolder',
+			description:
+				'The folder to check, for example a copy of a template folder. It can be in another library of the site.',
+		}),
+		displayOptions: show(['compareStructure']),
+	},
+	{
+		displayName: 'Options',
+		name: 'compareOptions',
+		type: 'collection',
+		placeholder: 'Add Option',
+		default: {},
+		displayOptions: show(['compareStructure']),
+		options: [
+			{
+				displayName: 'Case Sensitive',
+				name: 'caseSensitive',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether "Folder" and "folder" are different names. SharePoint names are not case-sensitive.',
+			},
+			{
+				displayName: 'Exclude Names',
+				name: 'excludeNames',
+				type: 'string',
+				typeOptions: { rows: 2 },
+				default: '',
+				placeholder: 'Archive, ~*, Drafts/Old',
+				description:
+					'Names to leave out of the comparison, separated by commas or line breaks. "*" matches any text and "?" matches one character. A value with "/" matches the path below the folder. The content of an excluded folder is not read.',
+			},
+			{
+				displayName: 'Include',
+				name: 'include',
+				type: 'options',
+				default: 'folders',
+				options: [
+					{ name: 'Folders', value: 'folders' },
+					{ name: 'Files', value: 'files' },
+					{ name: 'Both', value: 'both' },
+				],
+				description: 'What to compare',
+			},
+			{
+				displayName: 'Max Depth',
+				name: 'maxDepth',
+				type: 'number',
+				typeOptions: { minValue: 0 },
+				default: 1,
+				description:
+					'How many folder levels to compare. 1 compares only the direct children. 0 compares all levels.',
+			},
+		],
+	},
 ];
 
-interface ListInfo {
-	id: string;
-	rootUrl: string;
+async function findList(sp: SPFI, path: string): Promise<ListRoot | undefined> {
+	return findOwningList(path, await getListRoots(sp));
 }
 
-async function findList(sp: SPFI, path: string): Promise<ListInfo | undefined> {
-	const lists = await sp.web.lists
-		.select('Id', 'RootFolder/ServerRelativeUrl')
-		.expand('RootFolder')();
-	return findOwningList(
-		path,
-		lists.map((list) => ({
-			id: list.Id as string,
-			rootUrl: (list as unknown as { RootFolder: { ServerRelativeUrl: string } }).RootFolder
-				.ServerRelativeUrl,
-		})),
-	);
+/** Reads the rows of one folder level page by page, up to "max" rows. */
+async function readFolderRows(
+	list: IList,
+	path: string,
+	viewXml: string,
+	max: number,
+	includeListItem = false,
+	extraFields: string[] = [],
+): Promise<IDataObject[]> {
+	const found: IDataObject[] = [];
+	let query = new Map<string, string>();
+	while (found.length < max) {
+		const page = await list.renderListDataAsStream(
+			{
+				ViewXml: viewXml,
+				FolderServerRelativeUrl: path,
+				RenderOptions: 2,
+				DatesInUtc: true,
+				AddAllFields: includeListItem,
+			},
+			null,
+			query,
+		);
+		for (const row of page.Row as unknown as IDataObject[]) {
+			found.push(normalizeRow(row, includeListItem, extraFields));
+			if (found.length >= max) break;
+		}
+		if (!page.NextHref) break;
+		query = new Map(new URLSearchParams(page.NextHref).entries());
+	}
+	return found;
 }
 
 async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
@@ -238,7 +400,12 @@ async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 	const options = this.getNodeParameter('options', itemIndex, {}) as Pick<
 		SelectionValues,
 		'additionalProperties' | 'returnAllProperties'
-	> & { includeListItem?: boolean };
+	> & {
+		includeListItem?: boolean;
+		fieldFiltersCombine?: string;
+		minDepth?: number;
+		maxDepth?: number;
+	};
 	const extensions = parseExtensions(filters.extensions);
 	const includeListItem = options.includeListItem === true || options.returnAllProperties === true;
 	const extraFields = toList(options.additionalProperties);
@@ -249,77 +416,56 @@ async function getAll(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: Opera
 			itemIndex,
 		});
 	}
+	const spList = sp.web.lists.getById(list.id);
 
-	const noCamlFilters = !filters.nameContains && !filters.modifiedAfter && !filters.modifiedBefore;
 	let outputView: string;
 	let foldersView: string;
+	let fieldCondition: string | undefined;
+	let depth: DepthRange;
 	try {
+		depth = toDepthRange(recursive, options.minDepth, options.maxDepth);
+		const fieldFilters = readFieldFilters(this.getNodeParameter('fieldValueFilters', itemIndex, {}));
+		if (fieldFilters.length) {
+			fieldCondition = buildCamlFilter(
+				fieldFilters,
+				await loadFilterFieldTypes(spList, fieldFilters),
+				readCombine(options.fieldFiltersCombine),
+			);
+		}
 		outputView = buildViewXml(
 			{
 				include: extensions.length && include === 'all' ? 'files' : include,
 				nameContains: filters.nameContains,
 				modifiedAfter: filters.modifiedAfter,
 				modifiedBefore: filters.modifiedBefore,
+				fieldCondition,
 			},
 			500,
 			extraFields,
 		);
 		foldersView = buildViewXml({ include: 'folders' });
 	} catch (error) {
-		throw new NodeOperationError(this.getNode(), error as Error, { itemIndex });
+		throw toNodeError(this.getNode(), error, itemIndex);
 	}
-	const outputHasAllFolders = include === 'all' && noCamlFilters && !extensions.length;
+	const noCamlFilters =
+		!filters.nameContains && !filters.modifiedAfter && !filters.modifiedBefore && !fieldCondition;
 
-	const spList = sp.web.lists.getById(list.id);
-	const readFolder = async (path: string, viewXml: string, max: number) => {
-		const found: IDataObject[] = [];
-		let query = new Map<string, string>();
-		while (found.length < max) {
-			const page = await spList.renderListDataAsStream(
-				{
-					ViewXml: viewXml,
-					FolderServerRelativeUrl: path,
-					RenderOptions: 2,
-					DatesInUtc: true,
-					AddAllFields: includeListItem,
-				},
-				null,
-				query,
-			);
-			for (const row of page.Row as unknown as IDataObject[]) {
-				found.push(normalizeRow(row, includeListItem, extraFields));
-				if (found.length >= max) break;
-			}
-			if (!page.NextHref) break;
-			query = new Map(new URLSearchParams(page.NextHref).entries());
-		}
-		return found;
-	};
+	const readFolder = async (path: string, viewXml: string, max: number) =>
+		await readFolderRows(spList, path, viewXml, max, includeListItem, extraFields);
 
 	// A recursive "Scope" view reads the whole library page by page, so each folder gets its own request.
-	const entries: IDataObject[] = [];
-	const queue = [folderPath];
-	while (queue.length && entries.length < limit) {
-		const path = queue.shift() as string;
-		const level = await readFolder(
-			path,
-			outputView,
-			extensions.length ? Infinity : limit - entries.length,
-		);
-		for (const entry of level) {
-			if (extensions.length && !hasExtension(String(entry.name), extensions)) continue;
-			if (entries.length < limit) entries.push(entry);
-		}
-		if (recursive) {
-			const folders = outputHasAllFolders ? level : await readFolder(path, foldersView, Infinity);
-			queue.push(
-				...folders
-					.filter((entry) => entry.type === 'folder')
-					.map((entry) => String(entry.serverRelativeUrl)),
-			);
-		}
-	}
-	return entries;
+	return await walkFolders(
+		folderPath,
+		{
+			readOutput: async (path, max) => await readFolder(path, outputView, max),
+			readFolders: async (path) => await readFolder(path, foldersView, Infinity),
+			outputHasAllFolders: include === 'all' && noCamlFilters && !extensions.length,
+			accept: extensions.length
+				? (entry) => hasExtension(String(entry.name), extensions)
+				: undefined,
+		},
+		{ depth, limit, addDepth: recursive },
+	);
 }
 
 async function probe(sp: SPFI, path: string): Promise<IDataObject> {
@@ -341,10 +487,26 @@ async function probe(sp: SPFI, path: string): Promise<IDataObject> {
 	return { exists: false, type: null, serverRelativeUrl: path };
 }
 
+export type CombineMode = 'all' | 'any';
+
+/** Builds the output of Check Exists. "exists" is the result for the Combine mode and selects the output. */
+export function summarizeExists(results: IDataObject[], combine: CombineMode): IDataObject {
+	const allExist = results.every((result) => result.exists === true);
+	const anyExists = results.some((result) => result.exists === true);
+	return {
+		exists: combine === 'any' ? anyExists : allExist,
+		allExist,
+		anyExists,
+		combine,
+		results,
+	};
+}
+
 async function checkExists(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const collection = this.getNodeParameter('paths', itemIndex, {}) as {
 		values?: Array<{ path?: string }>;
 	};
+	const combine = this.getNodeParameter('combine', itemIndex, 'all') as CombineMode;
 	const paths = (collection.values ?? [])
 		.flatMap((entry) => String(entry.path ?? '').split(/\r?\n/))
 		.map((path) => path.trim())
@@ -355,15 +517,13 @@ async function checkExists(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: 
 
 	const results: IDataObject[] = [];
 	for (const path of paths) {
-		const serverRelativePath = toServerRelativePath(siteUrl, path);
-		results.push({ path, ...(await probe(sp, serverRelativePath)) });
+		const { serverRelativeUrl, exists, type } = await probe(
+			sp,
+			toServerRelativePath(siteUrl, path),
+		);
+		results.push({ path, serverRelativeUrl, exists, type });
 	}
-	return results.map(({ path, serverRelativeUrl, exists, type }) => ({
-		path,
-		serverRelativeUrl,
-		exists,
-		type,
-	}));
+	return summarizeExists(results, combine);
 }
 
 async function getCopyJobStatusOperation(
@@ -383,12 +543,92 @@ async function getCopyJobStatusOperation(
 	};
 }
 
+function createFolderReader(sp: SPFI, lists: ListRoot[]): FolderReader {
+	const views = {
+		all: buildViewXml({ include: 'all' }),
+		folders: buildViewXml({ include: 'folders' }),
+	};
+	return async (path, foldersOnly) => {
+		const list = findOwningList(path, lists);
+		if (!list) throw new Error(`No list or library contains "${path}"`);
+		const rows = await readFolderRows(
+			sp.web.lists.getById(list.id),
+			path,
+			foldersOnly ? views.folders : views.all,
+			Infinity,
+		);
+		return rows.map((row) => ({
+			name: String(row.name),
+			type: row.type === 'folder' ? 'folder' : 'file',
+			serverRelativeUrl: String(row.serverRelativeUrl),
+		}));
+	};
+}
+
+async function compareStructure(
+	this: IExecuteFunctions,
+	{ sp, siteUrl, itemIndex }: OperationContext,
+) {
+	const source = getPath.call(this, siteUrl, itemIndex, 'sourceFolder');
+	const target = getPath.call(this, siteUrl, itemIndex, 'targetFolder');
+	const options = this.getNodeParameter('compareOptions', itemIndex, {}) as {
+		include?: CompareInclude;
+		maxDepth?: number;
+		caseSensitive?: boolean;
+		excludeNames?: string;
+	};
+	const treeOptions: TreeOptions = {
+		include: options.include ?? 'folders',
+		maxDepth: Math.max(0, Math.floor(options.maxDepth ?? 1)),
+		caseSensitive: options.caseSensitive === true,
+		exclude: parsePatterns(options.excludeNames),
+	};
+
+	if (!(await folderExists(sp, source))) {
+		throw new NodeOperationError(this.getNode(), `The source folder "${source}" does not exist`, {
+			itemIndex,
+		});
+	}
+	const targetExists = await folderExists(sp, target);
+	const read = createFolderReader(sp, await getListRoots(sp));
+	let sourceTree: TreeEntry[];
+	let targetTree: TreeEntry[] = [];
+	try {
+		sourceTree = await readTree(source, read, treeOptions);
+		if (targetExists) targetTree = await readTree(target, read, treeOptions);
+	} catch (error) {
+		if (error instanceof Error && error.constructor === Error) {
+			throw new NodeOperationError(this.getNode(), error.message, { itemIndex });
+		}
+		throw toNodeError(this.getNode(), error, itemIndex);
+	}
+	return {
+		...compareTrees(sourceTree, targetTree, treeOptions.caseSensitive),
+		source,
+		target,
+		targetExists,
+	} as IDataObject;
+}
+
 export const fileFolderResource: ResourceModule = {
 	option: {
 		name: 'File/Folder',
 		value: 'fileFolder',
-		description: 'Find files and folders, check if paths exist, and check copy jobs',
+		description:
+			'Find files and folders, check if paths exist, compare folders, and check copy jobs',
 	},
 	description,
-	operations: { getAll, checkExists, getCopyJobStatus: getCopyJobStatusOperation },
+	operations: {
+		getAll,
+		checkExists,
+		compareStructure,
+		getCopyJobStatus: getCopyJobStatusOperation,
+	},
+	routing: {
+		checkExists: {
+			outputs: ['True', 'False'],
+			route: (result) => ((result as IDataObject).exists === true ? 0 : 1),
+			errorOutput: 1,
+		},
+	},
 };
