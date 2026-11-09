@@ -58,7 +58,7 @@ export function buildSiteCreationRequest(
 	const request: SiteCreationRequest = {
 		Title: settings.title.trim(),
 		Url: resolveNewSiteUrl(tenantUrl, settings.url),
-		Lcid: settings.language ?? 1033,
+		Lcid: Number(settings.language ?? 1033),
 		ShareByEmailEnabled: settings.shareByEmailEnabled === true,
 		Description: settings.description ?? '',
 		Classification: settings.classification ?? '',

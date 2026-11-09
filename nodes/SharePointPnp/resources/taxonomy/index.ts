@@ -17,6 +17,7 @@ import {
 	type TermLocation,
 	type TermMatchType,
 } from './service';
+import { locatorValue } from '../../shared/pickers';
 
 const RESOURCE = 'taxonomy';
 const GUID_REGEX = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
@@ -59,6 +60,18 @@ function taxonomyLocator(
 	};
 }
 
+function termLocator(
+	displayName: string,
+	name: string,
+	description: string,
+	required: boolean,
+): INodeProperties {
+	return {
+		...taxonomyLocator(displayName, name, description, 'searchTerms', required),
+		hint: 'The list shows the terms of the selected term set',
+	};
+}
+
 const languageOption = (description: string): INodeProperties => ({
 	displayName: 'Language (LCID)',
 	name: 'language',
@@ -83,12 +96,13 @@ const labelsOption = (description: string): INodeProperties => ({
 			values: [
 				{ displayName: 'Text', name: 'value', type: 'string', default: '' },
 				{
-					displayName: 'Language (LCID)',
+					displayName: 'Language Name or ID',
 					name: 'language',
-					type: 'number',
-					typeOptions: { minValue: 0 },
+					type: 'options',
+					typeOptions: { loadOptionsMethod: 'getTermStoreLanguageOptions' },
 					default: 0,
-					description: 'The language of the label. 0 uses the default language of the term store.',
+					description:
+						'The language of the label. 0 uses the default language of the term store. Choose from the list, or specify an LCID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 				},
 			],
 		},
@@ -177,13 +191,17 @@ const description: INodeProperties[] = [
 		displayOptions: show(['getTermSet', 'getTerms', 'searchTerms', 'createTerm']),
 	},
 	{
-		displayName: 'Term ID',
-		name: 'termId',
-		type: 'string',
-		default: '',
-		required: true,
-		placeholder: '00000000-0000-0000-0000-000000000000',
-		description: 'The ID (GUID) of the term',
+		...taxonomyLocator(
+			'Term Set (to Pick From)',
+			'termSetHelper',
+			'Optional. Only fills the "Term" list below. The operation does not use it.',
+			'searchTermSets',
+			false,
+		),
+		displayOptions: show(['getTerm', 'updateTerm', 'deleteTerm']),
+	},
+	{
+		...termLocator('Term', 'termId', 'The term', true),
 		displayOptions: show(['getTerm', 'updateTerm', 'deleteTerm']),
 	},
 
@@ -205,12 +223,13 @@ const description: INodeProperties[] = [
 		displayOptions: show(['createTerm']),
 		options: [
 			{
-				displayName: 'Parent Term ID',
-				name: 'parentTermId',
-				type: 'string',
-				default: '',
-				description:
+				...termLocator(
+					'Parent Term',
+					'parentTermId',
 					'Create the term under this term. Empty creates it at the top of the term set.',
+					false,
+				),
+				default: { mode: 'list', value: '' },
 			},
 			{
 				displayName: 'Description',
@@ -310,12 +329,13 @@ const description: INodeProperties[] = [
 					'Whether to include all child terms at all levels. If off, only the terms directly under the term set or parent term are returned.',
 			},
 			{
-				displayName: 'Parent Term ID',
-				name: 'parentTermId',
-				type: 'string',
-				default: '',
-				description:
+				...termLocator(
+					'Parent Term',
+					'parentTermId',
 					'Only return the terms under this term. Empty starts at the top of the term set.',
+					false,
+				),
+				default: { mode: 'list', value: '' },
 			},
 		],
 	},
@@ -362,7 +382,7 @@ function locator(
 }
 
 function termId(this: IExecuteFunctions, name: string, itemIndex: number, required = true): string {
-	const value = String(this.getNodeParameter(name, itemIndex, '') ?? '').trim();
+	const value = locatorValue(this.getNodeParameter(name, itemIndex, ''));
 	if (!value) {
 		if (!required) return '';
 		throw new NodeOperationError(this.getNode(), `The parameter "${name}" must not be empty`, {
@@ -411,9 +431,9 @@ async function getTermsOperation(this: IExecuteFunctions, context: OperationCont
 	const { itemIndex } = context;
 	const options = this.getNodeParameter('getTermsOptions', itemIndex, {}) as {
 		recursive?: boolean;
-		parentTermId?: string;
+		parentTermId?: unknown;
 	};
-	const parentTermId = options.parentTermId?.trim();
+	const parentTermId = locatorValue(options.parentTermId);
 	if (parentTermId && !isGuid(parentTermId)) {
 		throw new NodeOperationError(
 			this.getNode(),
@@ -477,12 +497,12 @@ async function createTermOperation(this: IExecuteFunctions, context: OperationCo
 		throw new NodeOperationError(this.getNode(), 'The term name must not be empty', { itemIndex });
 	}
 	const options = this.getNodeParameter('createOptions', itemIndex, {}) as {
-		parentTermId?: string;
+		parentTermId?: unknown;
 		description?: string;
 		language?: number;
 		labels?: unknown;
 	};
-	const parent = options.parentTermId?.trim();
+	const parent = locatorValue(options.parentTermId);
 	if (parent && !isGuid(parent)) {
 		throw new NodeOperationError(this.getNode(), `"${parent}" is not a valid term ID (GUID)`, {
 			itemIndex,

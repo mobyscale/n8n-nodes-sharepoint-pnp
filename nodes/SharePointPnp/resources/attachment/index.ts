@@ -6,9 +6,10 @@ import '@pnp/sp/attachments/index.js';
 import { getList, listRLC } from '../../shared/descriptions';
 import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import { undefinedIfNotFound } from '../../shared/filesFolders';
+import { itemIdRLC, locatorValue, parseItemId } from '../../shared/pickers';
 import { getRequiredString } from '../../shared/utils';
 import type { OperationContext, ResourceModule } from '../types';
-import { getAttachmentSupportError, parseItemId, toArrayBuffer } from './helpers';
+import { getAttachmentSupportError, toArrayBuffer } from './helpers';
 
 const RESOURCE = 'attachment';
 const show = (operations: string[]) => ({ show: { resource: [RESOURCE], operation: operations } });
@@ -19,11 +20,19 @@ const ATTACHMENT_SELECT = ['FileName', 'ServerRelativeUrl'];
 const nameProperty = (operations: string[], description: string): INodeProperties => ({
 	displayName: 'Attachment Name',
 	name: 'attachmentName',
-	type: 'string',
+	type: 'resourceLocator',
 	required: true,
-	default: '',
-	placeholder: 'Report.pdf',
+	default: { mode: 'list', value: '' },
 	description,
+	modes: [
+		{
+			displayName: 'From List',
+			name: 'list',
+			type: 'list',
+			typeOptions: { searchListMethod: 'searchItemAttachments', searchable: true },
+		},
+		{ displayName: 'By Name', name: 'name', type: 'string', placeholder: 'Report.pdf' },
+	],
 	displayOptions: show(operations),
 });
 
@@ -73,16 +82,10 @@ const description: INodeProperties[] = [
 		description: 'The list that has the item. Document libraries do not support attachments.',
 		displayOptions: show(ALL),
 	},
-	{
-		displayName: 'Item ID',
-		name: 'itemId',
-		type: 'number',
-		typeOptions: { minValue: 1 },
-		required: true,
-		default: 1,
-		description: 'The ID of the list item',
-		displayOptions: show(ALL),
-	},
+	itemIdRLC(
+		{ displayOptions: show(ALL) },
+		'The list item. Choose from the list or give the numeric ID.',
+	),
 	nameProperty(['download', 'delete', 'updateContent'], 'The file name of the attachment'),
 	{
 		displayName: 'File Name',
@@ -171,6 +174,16 @@ async function getAttachments(this: IExecuteFunctions, sp: SPFI, itemIndex: numb
 	return { attachments: list.items.getById(itemId).attachmentFiles, itemId };
 }
 
+function readAttachmentName(this: IExecuteFunctions, itemIndex: number): string {
+	const name = locatorValue(this.getNodeParameter('attachmentName', itemIndex, ''));
+	if (!name) {
+		throw new NodeOperationError(this.getNode(), 'The attachment name must not be empty', {
+			itemIndex,
+		});
+	}
+	return name;
+}
+
 function readBinaryName(this: IExecuteFunctions, itemIndex: number): string {
 	return getRequiredString.call(this, 'binaryPropertyName', itemIndex);
 }
@@ -223,7 +236,7 @@ async function getAll(this: IExecuteFunctions, { sp, itemIndex }: OperationConte
 
 async function download(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
 	const { attachments, itemId } = await getAttachments.call(this, sp, itemIndex);
-	const name = getRequiredString.call(this, 'attachmentName', itemIndex);
+	const name = readAttachmentName.call(this, itemIndex);
 	const binaryPropertyName = readBinaryName.call(this, itemIndex);
 	const attachment = attachments.getByName(name);
 	const info = (await attachment.select(...ATTACHMENT_SELECT)()) as unknown as IDataObject;
@@ -234,7 +247,7 @@ async function download(this: IExecuteFunctions, { sp, itemIndex }: OperationCon
 
 async function deleteAttachment(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
 	const { attachments, itemId } = await getAttachments.call(this, sp, itemIndex);
-	const name = getRequiredString.call(this, 'attachmentName', itemIndex);
+	const name = readAttachmentName.call(this, itemIndex);
 	const options = this.getNodeParameter('deleteOptions', itemIndex, {}) as { permanent?: boolean };
 	const attachment = attachments.getByName(name);
 	if (options.permanent) await attachment.delete();
@@ -244,7 +257,7 @@ async function deleteAttachment(this: IExecuteFunctions, { sp, itemIndex }: Oper
 
 async function updateContent(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
 	const { attachments, itemId } = await getAttachments.call(this, sp, itemIndex);
-	const name = getRequiredString.call(this, 'attachmentName', itemIndex);
+	const name = readAttachmentName.call(this, itemIndex);
 	const { content } = await readInput.call(this, itemIndex);
 	const attachment = attachments.getByName(name);
 	await attachment.setContent(content);

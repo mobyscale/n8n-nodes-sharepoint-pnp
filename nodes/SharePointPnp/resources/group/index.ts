@@ -8,8 +8,11 @@ import {
 	getUserParameter,
 	groupRLC,
 	parsePrincipalOrThrow,
+	principalRLC,
+	readPrincipalInput,
 	resolveGroupId,
 	resolvePrincipalReference,
+	userRLC,
 	type LocatorValue,
 } from '../../shared/securables';
 import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
@@ -40,7 +43,7 @@ const USER_SELECT = ['Id', 'Title', 'LoginName', 'Email', 'PrincipalType', 'IsSi
 interface GroupFields {
 	title?: string;
 	description?: string;
-	owner?: string;
+	owner?: unknown;
 	allowMembersEditMembership?: boolean;
 	allowRequestToJoinLeave?: boolean;
 	autoAcceptRequestToJoinLeave?: boolean;
@@ -85,13 +88,11 @@ const settingFields = (): INodeProperties[] => [
 		description: 'Whether only members of the group can see who the members are',
 	},
 	{
+		...principalRLC,
 		displayName: 'Owner',
 		name: 'owner',
-		type: 'string',
-		default: '',
-		placeholder: 'owner@contoso.com',
-		description:
-			'The owner of the group: a user email address or login name, a group name, or a principal ID',
+		required: false,
+		description: 'The owner of the group: a user or a group',
 	},
 	{
 		displayName: 'Request Email',
@@ -176,14 +177,23 @@ const description: INodeProperties[] = [
 		displayOptions: show(['create']),
 	},
 	{
-		displayName: 'User',
-		name: 'user',
-		type: 'string',
-		required: true,
-		default: '',
-		placeholder: 'user@contoso.com',
-		description: 'The email address or login name of the user',
-		displayOptions: show(['addMember', 'removeMember']),
+		...userRLC,
+		displayOptions: show(['addMember']),
+	},
+	{
+		...userRLC,
+		description: 'A member of the group. Pick one, or type an email address or a login name.',
+		typeOptions: { loadOptionsDependsOn: ['site.value', 'group.value'] },
+		modes: [
+			{
+				displayName: 'From List',
+				name: 'list',
+				type: 'list',
+				typeOptions: { searchListMethod: 'searchGroupMembers', searchable: true },
+			},
+			...userRLC.modes!.filter((mode) => mode.name !== 'list'),
+		],
+		displayOptions: show(['removeMember']),
 	},
 	{
 		displayName: 'Additional Fields',
@@ -293,14 +303,15 @@ async function setOwner(
 	context: IExecuteFunctions,
 	sp: SPFI,
 	groupId: number,
-	owner: string | undefined,
+	owner: unknown,
 	itemIndex: number,
 ) {
-	if (!owner?.trim()) return;
+	const { text, type } = readPrincipalInput(owner);
+	if (!text) return;
 	const ownerId = await resolvePrincipalReference(
 		context.getNode(),
 		sp,
-		parsePrincipalOrThrow(context.getNode(), owner, itemIndex),
+		parsePrincipalOrThrow(context.getNode(), text, itemIndex, type),
 		itemIndex,
 	);
 	await sp.web.siteGroups.getById(groupId).setUserAsOwner(ownerId);

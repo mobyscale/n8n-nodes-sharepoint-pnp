@@ -21,3 +21,10 @@ Taxonomy does not use PnPjs. It uses SharePoint CSOM through the `_vti_bin/clien
 - The identity must have access to the term store.
 - Term store changes apply to the whole tenant.
 - **Delete Term** deletes the child terms too.
+
+## Pickers
+
+- **Term** in Get Term, Update Term and Delete Term has **From List** and **By ID**. The list shows the terms of one term set. Select the term set in **Term Set (to Pick From)** first. SharePoint does not search all term sets by label in one call, so this helper is needed. The operation itself does not use the helper.
+- **Parent Term** in the Create Term and Get Terms options shows the terms of the selected **Term Set**. Empty means the top of the term set.
+- **Language** of the additional labels shows the languages of the term store. **Default Language of the Term Store** is 0. An expression can give any LCID.
+- Older workflows with a plain term ID in these fields keep working.

@@ -26,3 +26,7 @@ PnPjs: [Recycle bin](https://pnp.github.io/pnpjs/sp/recycle-bin/).
 
 - **Search** reads results in pages of up to 500 rows. SharePoint can repeat a row across pages when the index changes. **Include Raw Result** contains the last page only.
 - **Recycle Bin, Site scope** includes items of subsites. Get Many reads the recycle bin of the site collection and filters by path.
+
+## Item picker
+
+**Item Names or IDs** in Restore, Delete Permanently and Move to Second Stage is a multi-select. It reads up to 500 items of the selected **Scope** (first stage before second stage) and sorts them A-Z by name. The description shows the stage and the deletion date. The name has the form `Title (folder, deleted by Name)`. An expression can give an array or a comma-separated list of IDs, so older workflows keep working.

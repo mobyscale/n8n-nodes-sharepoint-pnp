@@ -1,10 +1,4 @@
-export function parseItemId(input: unknown): number {
-	const value = String(input ?? '').trim();
-	if (!/^\d+$/.test(value) || Number(value) < 1) {
-		throw new Error(`"${value}" is not a valid item ID`);
-	}
-	return Number(value);
-}
+export { parseItemId } from '../../shared/pickers';
 
 export function toArrayBuffer(buffer: Buffer): ArrayBuffer {
 	return buffer.buffer.slice(

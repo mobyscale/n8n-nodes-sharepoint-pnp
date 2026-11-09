@@ -7,6 +7,7 @@ import {
 	locator,
 	removeTestFolder,
 	runNode,
+	itWrite,
 } from './harness';
 
 describe.runIf(hasConfig)('sharing', () => {
@@ -89,7 +90,7 @@ describe.runIf(hasConfig)('sharing', () => {
 		}
 	});
 
-	it.skip('shares with users (grants access and can send email)', async () => {
+	itWrite('shares with users (grants access and can send email)', async () => {
 		await runNode({
 			resource: 'sharing',
 			operation: 'shareWithUsers',
@@ -100,7 +101,7 @@ describe.runIf(hasConfig)('sharing', () => {
 		});
 	});
 
-	it.skip('checks sharing permissions of users', async () => {
+	itWrite('checks sharing permissions of users', async () => {
 		await runNode({
 			resource: 'sharing',
 			operation: 'checkPermissions',

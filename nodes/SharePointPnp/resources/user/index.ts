@@ -1,9 +1,10 @@
 import type { IDataObject, IExecuteFunctions, INodeProperties } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
-import { isSystemAccount, toLoginName } from '../../shared/securables';
+import { isSystemAccount, toLoginName, userRLC } from '../../shared/securables';
 import { applySelection, selectionOptions, type SelectionValues } from '../../shared/selection';
 import type { OperationContext, ResourceModule } from '../types';
+import { locatorValue } from '../../shared/pickers';
 
 const RESOURCE = 'user';
 const show = (operations: string[], extra: IDataObject = {}) => ({
@@ -51,13 +52,9 @@ const description: INodeProperties[] = [
 		default: 'get',
 	},
 	{
-		displayName: 'User',
-		name: 'user',
-		type: 'string',
-		required: true,
-		default: '',
-		placeholder: 'user@contoso.com',
-		description: 'The email address or login name of the user',
+		...userRLC,
+		description:
+			'The user. Pick a user of the site or of the directory, or type an email address or a login name.',
 		displayOptions: show(['ensure']),
 	},
 	{
@@ -73,12 +70,10 @@ const description: INodeProperties[] = [
 		displayOptions: show(['get']),
 	},
 	{
+		...userRLC,
 		displayName: 'Email',
 		name: 'email',
-		type: 'string',
-		placeholder: 'name@email.com',
-		required: true,
-		default: '',
+		description: 'The email address of a user of the site',
 		displayOptions: show(['get'], { identifyBy: ['email'] }),
 	},
 	{
@@ -91,12 +86,10 @@ const description: INodeProperties[] = [
 		displayOptions: show(['get'], { identifyBy: ['id'] }),
 	},
 	{
+		...userRLC,
 		displayName: 'Login Name',
 		name: 'loginName',
-		type: 'string',
-		required: true,
-		default: '',
-		placeholder: 'i:0#.f|membership|user@contoso.com',
+		description: 'The login name of a user of the site',
 		displayOptions: show(['get'], { identifyBy: ['loginName'] }),
 	},
 	{
@@ -166,7 +159,7 @@ const description: INodeProperties[] = [
 ];
 
 async function ensure(this: IExecuteFunctions, { sp, itemIndex }: OperationContext) {
-	const user = String(this.getNodeParameter('user', itemIndex, '') ?? '').trim();
+	const user = locatorValue(this.getNodeParameter('user', itemIndex, ''));
 	if (!user) {
 		throw new NodeOperationError(this.getNode(), 'The user must not be empty', { itemIndex });
 	}
@@ -184,19 +177,21 @@ async function get(this: IExecuteFunctions, { sp, itemIndex }: OperationContext)
 		return (await read(users.getById(id))()) as unknown as IDataObject;
 	}
 	if (identifyBy === 'loginName') {
-		const loginName = String(this.getNodeParameter('loginName', itemIndex, '') ?? '').trim();
+		const loginName = locatorValue(this.getNodeParameter('loginName', itemIndex, ''));
 		if (!loginName) {
 			throw new NodeOperationError(this.getNode(), 'The login name must not be empty', {
 				itemIndex,
 			});
 		}
-		return (await read(
-			users.getByLoginName(toLoginName(loginName)),
-		)()) as unknown as IDataObject;
+		return (await read(users.getByLoginName(toLoginName(loginName)))()) as unknown as IDataObject;
 	}
-	const email = String(this.getNodeParameter('email', itemIndex, '') ?? '').trim();
+	const email = locatorValue(this.getNodeParameter('email', itemIndex, ''));
 	if (!email) {
 		throw new NodeOperationError(this.getNode(), 'The email must not be empty', { itemIndex });
+	}
+	// The picker can give a login name when a user has no email address.
+	if (email.includes('|') || !email.includes('@')) {
+		return (await read(users.getByLoginName(toLoginName(email)))()) as unknown as IDataObject;
 	}
 	return (await read(users.getByEmail(email))()) as unknown as IDataObject;
 }
