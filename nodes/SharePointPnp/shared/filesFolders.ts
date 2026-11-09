@@ -1,5 +1,5 @@
 import type { IDataObject, INodeProperties } from 'n8n-workflow';
-import type { IMoveCopyOptions } from '@pnp/sp/index.js';
+import type { IMoveCopyOptions, SPFI } from '@pnp/sp/index.js';
 
 import { pathRLC } from './descriptions';
 import { toList, type SelectionValues } from './selection';
@@ -15,17 +15,14 @@ export interface MoveCopyFields {
 	resetAuthorAndCreated?: boolean;
 }
 
-/** A file path picker. Only the "By Path" mode exists, because the folder search lists folders only. */
+/**
+ * A file path picker. In "From List" mode the search text works as a path, like the folder picker,
+ * and the results have the folders and files of the parent path.
+ */
 export function filePathRLC(
 	overrides: Partial<INodeProperties> & Pick<INodeProperties, 'displayName' | 'name'>,
 ): INodeProperties {
-	const base = pathRLC(overrides);
-	return {
-		...base,
-		default: { mode: 'path', value: '' },
-		modes: (base.modes ?? []).filter((mode) => mode.name === 'path'),
-		placeholder: undefined,
-	};
+	return { ...pathRLC(overrides, 'searchFiles'), default: { mode: 'path', value: '' } };
 }
 
 export function buildMoveCopyOptions(
@@ -74,6 +71,37 @@ export function getMissingSegments(path: string, existingAncestor: string): stri
 	);
 }
 
+export async function folderExists(sp: SPFI, path: string): Promise<boolean> {
+	const folder = await undefinedIfNotFound(
+		sp.web.getFolderByServerRelativePath(path).select('Exists')(),
+	);
+	return folder?.Exists ?? false;
+}
+
+/**
+ * Creates the folder and the parent folders that are missing. Returns false when the folder exists.
+ * The first folder level must be a library that exists.
+ */
+export async function ensureFolder(sp: SPFI, siteUrl: string, path: string): Promise<boolean> {
+	if (await folderExists(sp, path)) return false;
+	let existingAncestor: string | undefined;
+	for (const candidate of getAncestorPaths(path, siteUrl).slice(1)) {
+		if (await folderExists(sp, candidate)) {
+			existingAncestor = candidate;
+			break;
+		}
+	}
+	if (!existingAncestor) {
+		throw new Error(
+			`No parent of "${path}" exists. The first folder level must be a library that exists.`,
+		);
+	}
+	for (const missing of getMissingSegments(path, existingAncestor)) {
+		await sp.web.folders.addUsingPath(missing, false);
+	}
+	return true;
+}
+
 /** Picks the list whose root folder is the longest parent of the path (or the path itself). */
 export function findOwningList<T extends { rootUrl: string }>(
 	path: string,
@@ -90,6 +118,23 @@ export function findOwningList<T extends { rootUrl: string }>(
 	return best;
 }
 
+export interface ListRoot {
+	id: string;
+	rootUrl: string;
+}
+
+/** Reads the ID and the root folder URL of each list of the web. */
+export async function getListRoots(sp: SPFI): Promise<ListRoot[]> {
+	const lists = await sp.web.lists
+		.select('Id', 'RootFolder/ServerRelativeUrl')
+		.expand('RootFolder')();
+	return lists.map((list) => ({
+		id: list.Id as string,
+		rootUrl: (list as unknown as { RootFolder: { ServerRelativeUrl: string } }).RootFolder
+			.ServerRelativeUrl,
+	}));
+}
+
 export type IncludeKind = 'all' | 'files' | 'folders';
 
 export interface FileFolderFilters {
@@ -97,6 +142,8 @@ export interface FileFolderFilters {
 	nameContains?: string;
 	modifiedAfter?: string;
 	modifiedBefore?: string;
+	/** A CAML condition (for example from Field Filters) that the entries must also match. */
+	fieldCondition?: string;
 }
 
 export function escapeXml(value: string): string {
@@ -108,7 +155,8 @@ export function escapeXml(value: string): string {
 		.replace(/'/g, '&apos;');
 }
 
-function combineConditions(operator: 'And' | 'Or', conditions: string[]): string {
+/** Joins CAML conditions with nested binary And or Or elements. */
+export function combineConditions(operator: 'And' | 'Or', conditions: string[]): string {
 	if (conditions.length === 1) return conditions[0];
 	const [first, ...rest] = conditions;
 	return rest.reduce((left, right) => `<${operator}>${left}${right}</${operator}>`, first);
@@ -161,6 +209,7 @@ export function buildViewXml(
 			`<Lt><FieldRef Name="Modified"/><Value Type="DateTime" IncludeTimeValue="TRUE">${toIsoDate(filters.modifiedBefore)}</Value></Lt>`,
 		);
 	}
+	if (filters.fieldCondition) conditions.push(filters.fieldCondition);
 	const where = conditions.length
 		? `<Query><Where>${combineConditions('And', conditions)}</Where></Query>`
 		: '';
