@@ -2,6 +2,7 @@ import type { INode, INodeProperties } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
 import type { ExpiredTokenMode, ExpiredTokenRunOptions } from './changes';
+import { pathRLC } from './descriptions';
 import {
 	CHANGE_EVENTS,
 	getEventFlags,
@@ -10,9 +11,12 @@ import {
 } from './changes';
 
 export interface TriggerOptions {
+	changeFieldFilters?: unknown;
+	changeMaxDepth?: number;
+	excludeEditors?: string;
 	fetchLimit?: number;
 	includeItemDetails?: boolean;
-	itemFields?: string;
+	itemFields?: string | string[];
 	onExpiredToken?: ExpiredTokenMode;
 	resolveDeletedItems?: boolean;
 	startFromDate?: string;
@@ -28,15 +32,14 @@ export const eventsProperty: INodeProperties = {
 	description: 'The changes that start the workflow',
 };
 
-export const folderPathFilterProperty: INodeProperties = {
+export const folderPathFilterProperty: INodeProperties = pathRLC({
 	displayName: 'Folder Path Filter',
 	name: 'folderPathFilter',
-	type: 'string',
-	default: '',
-	placeholder: 'Shared Documents/Folder',
+	required: false,
+	default: { mode: 'path', value: '' },
 	description:
 		'Only trigger for files, folders and items inside this folder and its subfolders. Leave empty for all. With the List scope, SharePoint reads the change log of the folder.',
-};
+});
 
 /** The options of the webhook trigger. It has no start date, because it saves a token at activation. */
 export const webhookTriggerOptionsProperty: INodeProperties = {
@@ -66,7 +69,7 @@ export function getTriggerSettings(ctx: ParameterContext, siteUrl: string): Trig
 	const options = (ctx.getNodeParameter('options', {}) ?? {}) as TriggerOptions;
 	const folderPathFilter = resolveFolderFilter(
 		siteUrl,
-		ctx.getNodeParameter('folderPathFilter', '') as string,
+		ctx.getNodeParameter('folderPathFilter', ''),
 	);
 	return {
 		events,
@@ -82,6 +85,9 @@ export function getTriggerSettings(ctx: ParameterContext, siteUrl: string): Trig
 			itemFields: options.itemFields,
 			resolveDeletedItems: options.resolveDeletedItems ?? true,
 			onExpiredToken: options.onExpiredToken,
+			maxDepth: options.changeMaxDepth,
+			excludeEditors: options.excludeEditors,
+			fieldFilters: options.changeFieldFilters,
 		},
 	};
 }

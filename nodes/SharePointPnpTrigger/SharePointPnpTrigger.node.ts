@@ -7,6 +7,7 @@ import type {
 } from 'n8n-workflow';
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
+import { getChangeItemFieldOptions } from '../SharePointPnp/methods/changeOptions';
 import * as listSearch from '../SharePointPnp/methods/listSearch';
 import {
 	eventsProperty,
@@ -83,7 +84,7 @@ export class SharePointPnpTrigger implements INodeType {
 		],
 	};
 
-	methods = { listSearch };
+	methods = { listSearch, loadOptions: { getChangeItemFieldOptions } };
 
 	async poll(this: IPollFunctions): Promise<INodeExecutionData[][] | null> {
 		try {

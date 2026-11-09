@@ -259,6 +259,90 @@ describe.runIf(hasConfig)('change resource and trigger', () => {
 		expect(staticData.changeToken).toBe(tokenBeforeManual);
 	});
 
+	it('reads item details in bulk and applies the Item Kind, Max Depth and other filters', async () => {
+		const [tokenItem] = await runNode({
+			resource: 'change',
+			operation: 'getCurrentToken',
+			...listParameters(),
+		});
+		const startToken = String(tokenItem.json.changeToken);
+
+		const sp = createTestSp();
+		const root = `${testFolder}/bulk`;
+		await sp.web.folders.addUsingPath(root);
+		const folder = sp.web.getFolderByServerRelativePath(root);
+		await folder.files.addUsingPath('one.txt', 'one', { Overwrite: true });
+		await folder.files.addUsingPath('two.txt', 'two', { Overwrite: true });
+		await folder.folders.addUsingPath('Reports');
+		await sp.web.folders.addUsingPath(`${root}/Reports/2024`);
+		await sp.web
+			.getFolderByServerRelativePath(`${root}/Reports/2024`)
+			.files.addUsingPath('deep.txt', 'deep', { Overwrite: true });
+		await sp.web.getFileByServerRelativePath(`${root}/one.txt`).setContent('one, updated');
+
+		const getChanges = async (options: IDataObject) =>
+			(
+				await runNode({
+					resource: 'change',
+					operation: 'getAll',
+					...listParameters(),
+					startFrom: 'token',
+					startPosition: startToken,
+					objectTypes: ['Item'],
+					changeTypes: ['Add', 'Update'],
+					returnAll: true,
+					queryOptions: {},
+					options: { resolveDeletedItems: false, folderPathFilter: root, ...options },
+				})
+			).map((item) => item.json as ChangeOutput);
+		const names = (changes: ChangeOutput[]) => [
+			...new Set(changes.map((change) => change.item?.name)),
+		];
+
+		const all = await getChanges({ includeItemDetails: true });
+		expect(names(all).sort()).toEqual(['2024', 'Reports', 'deep.txt', 'one.txt', 'two.txt']);
+		for (const change of all) {
+			expect(change.item?.exists).toBe(true);
+			expect(change.item?.serverRelativeUrl?.startsWith(`${root}/`)).toBe(true);
+		}
+		expect(all.find((change) => change.item?.name === 'Reports')?.item).toMatchObject({
+			kind: 'folder',
+			isFolder: true,
+		});
+		expect(all.find((change) => change.item?.name === 'deep.txt')?.item).toMatchObject({
+			kind: 'file',
+			isFile: true,
+			serverRelativeUrl: `${root}/Reports/2024/deep.txt`,
+		});
+		const updates = all.filter((change) => change.changeType === 'Update');
+		expect(names(updates)).toContain('one.txt');
+
+		const files = await getChanges({ includeItemDetails: true, changeItemKinds: ['file'] });
+		expect(names(files).sort()).toEqual(['deep.txt', 'one.txt', 'two.txt']);
+
+		const topLevel = await getChanges({ includeItemDetails: true, changeMaxDepth: 1 });
+		expect(names(topLevel).sort()).toEqual(['Reports', 'one.txt', 'two.txt']);
+
+		const topFolders = await getChanges({ changeItemKinds: ['folder'], changeMaxDepth: 2 });
+		expect(topFolders.length).toBeGreaterThan(0);
+		for (const change of topFolders) {
+			expect(change.item?.isFolder).toBe(true);
+		}
+		expect(names(topFolders).sort()).toEqual(['2024', 'Reports']);
+
+		const twoOnly = await getChanges({
+			changeFieldFilters: {
+				filter: [{ field: 'FileLeafRef', operator: 'equals', value: 'TWO.txt' }],
+			},
+		});
+		expect(names(twoOnly)).toEqual(['two.txt']);
+
+		expect(await getChanges({ excludeEditors: 'Nobody Example' })).toHaveLength(all.length);
+		// With app-only authentication, SharePoint leaves the Editor of a change empty.
+		const editor = String(all[0].Editor ?? '');
+		if (editor) expect(await getChanges({ excludeEditors: editor })).toEqual([]);
+	});
+
 	// A token from before the change log takes long to read in a folder change log (about a minute).
 	it('handles a change token that is older than the change log', { timeout: 600_000 }, async () => {
 		const day = 24 * 60 * 60 * 1000;

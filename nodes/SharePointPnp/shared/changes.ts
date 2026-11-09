@@ -2,12 +2,28 @@ import type { IDataObject, INode, INodeProperties } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 import { body } from '@pnp/queryable/index.js';
 import { Folder } from '@pnp/sp/folders/index.js';
+import { List } from '@pnp/sp/lists/index.js';
 import { spGet, SPQueryable, spPost, type SPFI } from '@pnp/sp/index.js';
 import type { IChangeQuery } from '@pnp/sp/types.js';
 import type { IWeb } from '@pnp/sp/webs/index.js';
 
-import { getListFromLocator } from './descriptions';
+import { runInBatches } from './batch';
+import type { EditorSource, ItemKind } from './changeFilters';
+import {
+	createEditorSource,
+	EditorDirectory,
+	getEditorEmail,
+	isEditorExcluded,
+	isWithinDepth,
+	matchesFieldFilters,
+	parseEditorList,
+	parseFieldFilters,
+	parseItemKinds,
+	parseMaxDepth,
+} from './changeFilters';
+import { getListFromLocator, pathRLC } from './descriptions';
 import { isNotFoundError, toServerRelativePath, trimTrailingSlash } from './utils';
+import { locatorValue } from './pickers';
 
 export type ChangeScope = 'siteCollection' | 'web' | 'list';
 
@@ -156,9 +172,17 @@ export interface QueryOptions {
 
 export interface ChangeOutputOptions {
 	includeItemDetails?: boolean;
-	itemFields?: string;
+	itemFields?: string | string[];
 	resolveDeletedItems?: boolean;
 	folderPathFilter?: string;
+	/** Item Kind: "file", "folder" and "item". Changes of other objects are removed. */
+	itemKinds?: string[];
+	/** Max Depth: folder levels below the folder path filter or the scope root. */
+	maxDepth?: number;
+	/** Exclude Editors: a comma-separated list of display names, emails or logins. */
+	excludeEditors?: string;
+	/** Field Filters: the fixedCollection value ({ filter: [{ field, operator, value }] }). */
+	fieldFilters?: unknown;
 }
 
 export interface ChangeQueryInput {
@@ -398,6 +422,8 @@ export interface RecycleBinEntry {
 export interface RecycleBinSource {
 	/** Finds an entry by the UniqueId of the deleted item. Large recycle bins can reject this query. */
 	findByUniqueId(uniqueId: string): Promise<RecycleBinEntry | undefined>;
+	/** Finds the entries of a few UniqueIds in one request. Large recycle bins can reject this query. */
+	findByUniqueIds?(uniqueIds: string[]): Promise<RecycleBinEntry[]>;
 	/** Reads one page, newest first. */
 	getPage(after?: RecycleBinEntry): Promise<RecycleBinEntry[]>;
 }
@@ -406,6 +432,8 @@ const RECYCLE_BIN_SELECT = ['Id', 'UniqueId', 'DeletedDate', 'DirName', 'LeafNam
 const RECYCLE_BIN_PAGE_SIZE = 200;
 const RECYCLE_BIN_MAX_PAGES = 25;
 const RECYCLE_BIN_MARGIN_MS = 5 * 60 * 1000;
+/** UniqueIds in one recycle bin filter. It keeps the URL short. */
+const RECYCLE_BIN_IDS_PER_QUERY = 20;
 
 function isAccessDenied(error: unknown): boolean {
 	const status = (error as { status?: number })?.status;
@@ -438,15 +466,17 @@ export function createRecycleBinSource(sp: SPFI): RecycleBinSource {
 		}
 		return await run(true);
 	};
+	const findByUniqueIds = async (uniqueIds: string[]) =>
+		await withFallback(async (useWebBin) => {
+			const bin = useWebBin ? sp.web.recycleBin : sp.site.recycleBin;
+			const filter = uniqueIds.map((id) => `UniqueId eq guid'${id}'`).join(' or ');
+			return (await bin
+				.filter(filter)
+				.select(...RECYCLE_BIN_SELECT)()) as unknown as RecycleBinEntry[];
+		});
 	return {
-		findByUniqueId: async (uniqueId) =>
-			await withFallback(async (useWebBin) => {
-				const bin = useWebBin ? sp.web.recycleBin : sp.site.recycleBin;
-				const entries = await bin
-					.filter(`UniqueId eq guid'${uniqueId}'`)
-					.select(...RECYCLE_BIN_SELECT)();
-				return entries[0] as unknown as RecycleBinEntry | undefined;
-			}),
+		findByUniqueId: async (uniqueId) => (await findByUniqueIds([uniqueId]))[0],
+		findByUniqueIds,
 		getPage: async (after) =>
 			await withFallback(async (useWebBin) => {
 				const paging = after
@@ -463,13 +493,20 @@ export function createRecycleBinSource(sp: SPFI): RecycleBinSource {
 	};
 }
 
+export interface RecycleBinRequest {
+	uniqueId: string;
+	changeTime?: string;
+}
+
 /**
- * Finds deleted items in the recycle bin by their UniqueId. It first asks for the UniqueId. When the
- * recycle bin is too large for that query, it reads the recycle bin newest first, until it passes
- * the time of the change. It keeps what it read, so later lookups in the same run are fast.
+ * Finds deleted items in the recycle bin by their UniqueId. It first asks for the UniqueIds, a few in
+ * each request. When the recycle bin is too large for that query, it reads the recycle bin newest
+ * first, until it passes the time of the oldest change. It keeps what it read, so later lookups in
+ * the same run send no more requests.
  */
 export class RecycleBinLookup {
 	private readonly entries = new Map<string, RecycleBinEntry>();
+	private readonly missing = new Set<string>();
 	private exactQuery = true;
 	private last: RecycleBinEntry | undefined;
 	private oldest = Infinity;
@@ -479,27 +516,27 @@ export class RecycleBinLookup {
 	constructor(private readonly source: RecycleBinSource) {}
 
 	async find(uniqueId: string, changeTime?: string): Promise<RecycleBinEntry | undefined> {
-		const key = uniqueId.toLowerCase();
-		const known = this.entries.get(key);
-		if (known) return known;
+		await this.findMany([{ uniqueId, changeTime }]);
+		return this.entries.get(uniqueId.toLowerCase());
+	}
 
-		if (this.exactQuery) {
-			const result = await this.source.findByUniqueId(uniqueId).then(
-				(entry) => ({ entry }),
-				(error: unknown) => {
-					if (isAccessDenied(error)) throw error;
-					this.exactQuery = false;
-					return undefined;
-				},
-			);
-			if (result) {
-				if (result.entry) this.entries.set(key, result.entry);
-				return result.entry;
-			}
+	/** Loads the entries of many deleted items. Use find to read them after. */
+	async findMany(requests: RecycleBinRequest[]): Promise<void> {
+		const pending = new Map<string, RecycleBinRequest>();
+		for (const request of requests) {
+			const key = request.uniqueId.toLowerCase();
+			if (!this.entries.has(key) && !this.missing.has(key)) pending.set(key, request);
 		}
+		if (!pending.size) return;
+		if (this.exactQuery && (await this.findExact([...pending.values()]))) return;
 
-		const time = changeTime ? Date.parse(changeTime) : NaN;
-		const stopBefore = Number.isFinite(time) ? time - RECYCLE_BIN_MARGIN_MS : -Infinity;
+		const times = [...pending.values()].map((request) =>
+			request.changeTime ? Date.parse(request.changeTime) : NaN,
+		);
+		const stopBefore = times.every(Number.isFinite)
+			? Math.min(...times) - RECYCLE_BIN_MARGIN_MS
+			: -Infinity;
+		const keys = [...pending.keys()];
 		while (!this.done && this.pages < RECYCLE_BIN_MAX_PAGES && this.oldest >= stopBefore) {
 			const page = await this.source.getPage(this.last);
 			this.pages++;
@@ -514,9 +551,44 @@ export class RecycleBinLookup {
 			}
 			this.last = page[page.length - 1];
 			if (page.length < RECYCLE_BIN_PAGE_SIZE) this.done = true;
-			if (this.entries.has(key)) break;
+			if (keys.every((key) => this.entries.has(key))) break;
 		}
-		return this.entries.get(key);
+	}
+
+	/** Returns false when the recycle bin rejects the UniqueId query. */
+	private async findExact(requests: RecycleBinRequest[]): Promise<boolean> {
+		for (let start = 0; start < requests.length; start += RECYCLE_BIN_IDS_PER_QUERY) {
+			const ids = requests.slice(start, start + RECYCLE_BIN_IDS_PER_QUERY).map((r) => r.uniqueId);
+			const query = this.source.findByUniqueIds
+				? this.source.findByUniqueIds(ids)
+				: this.findOneByOne(ids);
+			const result = await query.then(
+				(found) => ({ found }),
+				(error: unknown) => {
+					if (isAccessDenied(error)) throw error;
+					this.exactQuery = false;
+					return undefined;
+				},
+			);
+			if (!result) return false;
+			for (const entry of result.found) {
+				if (entry.UniqueId) this.entries.set(entry.UniqueId.toLowerCase(), entry);
+			}
+			for (const id of ids) {
+				const key = id.toLowerCase();
+				if (!this.entries.has(key)) this.missing.add(key);
+			}
+		}
+		return true;
+	}
+
+	private async findOneByOne(ids: string[]): Promise<RecycleBinEntry[]> {
+		const found: RecycleBinEntry[] = [];
+		for (const id of ids) {
+			const entry = await this.source.findByUniqueId(id);
+			if (entry) found.push({ ...entry, UniqueId: entry.UniqueId ?? id });
+		}
+		return found;
 	}
 }
 
@@ -533,18 +605,81 @@ function getFieldValue(item: IDataObject, path: string): unknown {
 	return value ?? null;
 }
 
-/** Resolves item details for changes. It caches webs, lists and items, so each one is read once. */
+/** The maximum number of values in a CAML In element. */
+export const ITEM_IDS_PER_QUERY = 500;
+/** The number of requests in one $batch request. */
+export const REQUESTS_PER_BATCH = 100;
+
+const BASE_ITEM_SELECT = ['Id', 'FileSystemObjectType', 'FileRef', 'FileLeafRef', 'Title'];
+
+/** A CAML query for list items by ID, in all folders. ID is always indexed, so large lists allow it. */
+export function buildItemIdQuery(ids: number[]): string {
+	const values = ids.map((id) => `<Value Type="Counter">${id}</Value>`).join('');
+	return `<View Scope="RecursiveAll"><Query><Where><In><FieldRef Name="ID"/><Values>${values}</Values></In></Where></Query><RowLimit>${ids.length}</RowLimit></View>`;
+}
+
+function chunk<T>(values: T[], size: number): T[][] {
+	const chunks: T[][] = [];
+	for (let start = 0; start < values.length; start += size) {
+		chunks.push(values.slice(start, start + size));
+	}
+	return chunks;
+}
+
+export interface DetailRequest {
+	change: IDataObject;
+	objectType: string;
+}
+
+interface PendingDetail {
+	key: string;
+	change: IDataObject;
+}
+
+interface ItemGroup {
+	webId: unknown;
+	listId: string;
+	entries: Array<PendingDetail & { id: number }>;
+}
+
+interface FileGroup {
+	webId: unknown;
+	entries: Array<PendingDetail & { isFolder: boolean }>;
+}
+
+/** Returns the cache key of the item of a change, or undefined when the change has no item. */
+export function getDetailKey(change: IDataObject, objectType: string): string | undefined {
+	if (objectType === 'Item' && change.ListId && change.ItemId !== undefined) {
+		return `item:${String(change.ListId).toLowerCase()}:${String(change.ItemId)}`;
+	}
+	const uniqueId = change.UniqueId as string | undefined;
+	if ((objectType === 'File' || objectType === 'Folder') && uniqueId) {
+		return `${objectType}:${uniqueId.toLowerCase()}`;
+	}
+	return undefined;
+}
+
+/**
+ * Resolves item details for changes. It caches webs, lists and items, so each one is read once.
+ * `prefetch` loads the details of many changes in bulk: list items with one CAML query per list for
+ * each 500 IDs, and files and folders without a list in $batch requests of 100.
+ */
 export class ChangeResolver {
 	private readonly webs = new Map<string, Promise<IWeb>>();
 	private readonly lists = new Map<string, Promise<ListInfo | undefined>>();
 	private readonly items = new Map<string, Promise<ItemDetails>>();
+	private readonly fieldValues = new WeakMap<ItemDetails, IDataObject>();
 	private readonly recycleBin: RecycleBinLookup | undefined;
+	private readonly selectFields: string[];
+	private readonly expandFields: string[];
 	private currentWebId: Promise<string> | undefined;
 
 	constructor(
 		private readonly sp: SPFI,
 		private readonly options: {
 			itemFields: string[];
+			/** More fields to read, for example for field filters. They are not in the output. */
+			extraFields?: string[];
 			resolveDeletedItems: boolean;
 			recycleBinSource?: RecycleBinSource;
 		},
@@ -554,6 +689,10 @@ export class ChangeResolver {
 				options.recycleBinSource ?? createRecycleBinSource(sp),
 			);
 		}
+		this.selectFields = [...new Set([...options.itemFields, ...(options.extraFields ?? [])])];
+		this.expandFields = [
+			...new Set(this.selectFields.filter((f) => f.includes('/')).map((f) => f.split('/')[0])),
+		];
 	}
 
 	private async getWeb(webId: unknown): Promise<IWeb> {
@@ -587,40 +726,149 @@ export class ChangeResolver {
 		return await info;
 	}
 
-	async getDetails(change: IDataObject, objectType: string): Promise<ItemDetails | undefined> {
-		const uniqueId = change.UniqueId as string | undefined;
-		let key: string;
-		let load: () => Promise<ItemDetails>;
-		if (objectType === 'Item' && change.ListId && change.ItemId !== undefined) {
-			key = `item:${String(change.ListId)}:${String(change.ItemId)}`;
-			load = async () => await this.loadItem(change);
-		} else if ((objectType === 'File' || objectType === 'Folder') && uniqueId) {
-			key = `${objectType}:${uniqueId}`;
-			load = async () => await this.loadFileOrFolder(change, objectType);
-		} else {
-			return undefined;
-		}
-		let details = this.items.get(key);
-		if (!details) {
-			details = load();
-			this.items.set(key, details);
-		}
-		return await details;
+	/** The values of the item fields and the extra fields. Undefined when the item has no fields. */
+	getFieldValues(details: ItemDetails | undefined): IDataObject | undefined {
+		return details ? this.fieldValues.get(details) : undefined;
 	}
 
-	private async loadItem(change: IDataObject): Promise<ItemDetails> {
-		const web = await this.getWeb(change.WebId);
-		const fields = this.options.itemFields;
-		const expand = [...new Set(fields.filter((f) => f.includes('/')).map((f) => f.split('/')[0]))];
-		let query = web.lists
-			.getById(String(change.ListId))
-			.items.getById(Number(change.ItemId))
-			.select('Id', 'FileSystemObjectType', 'FileRef', 'FileLeafRef', 'Title', ...fields);
-		if (expand.length) query = query.expand(...expand);
-		const item = (await query().catch(undefinedIfNotFound)) as IDataObject | undefined;
-		if (!item) return await this.loadDeleted(change);
+	async getDetails(change: IDataObject, objectType: string): Promise<ItemDetails | undefined> {
+		const key = getDetailKey(change, objectType);
+		if (!key) return undefined;
+		if (!this.items.has(key)) await this.prefetch([{ change, objectType }]);
+		return await this.items.get(key);
+	}
 
-		const listInfo = await this.getListInfo(change.WebId, change.ListId);
+	/** Loads the details of many changes in bulk. Changes that are already cached are skipped. */
+	async prefetch(requests: DetailRequest[]): Promise<void> {
+		const itemGroups = new Map<string, ItemGroup>();
+		const fileGroups = new Map<string, FileGroup>();
+		const keys = new Set<string>();
+		for (const { change, objectType } of requests) {
+			const key = getDetailKey(change, objectType);
+			if (!key || this.items.has(key) || keys.has(key)) continue;
+			keys.add(key);
+			const webKey = String(change.WebId ?? '').toLowerCase();
+			if (objectType === 'Item') {
+				const listId = String(change.ListId).toLowerCase();
+				const groupKey = `${webKey}|${listId}`;
+				let group = itemGroups.get(groupKey);
+				if (!group) {
+					group = { webId: change.WebId, listId, entries: [] };
+					itemGroups.set(groupKey, group);
+				}
+				group.entries.push({ key, change, id: Number(change.ItemId) });
+			} else {
+				let group = fileGroups.get(webKey);
+				if (!group) {
+					group = { webId: change.WebId, entries: [] };
+					fileGroups.set(webKey, group);
+				}
+				group.entries.push({ key, change, isFolder: objectType === 'Folder' });
+			}
+		}
+		if (!keys.size) return;
+
+		const run = this.loadAll([...itemGroups.values()], [...fileGroups.values()]);
+		for (const key of keys) {
+			const details = run.then((results) => results.get(key) ?? { exists: false });
+			// The error is thrown by `await run` below. This only marks the copies as handled.
+			details.catch(() => undefined);
+			this.items.set(key, details);
+		}
+		await run;
+	}
+
+	private async loadAll(
+		itemGroups: ItemGroup[],
+		fileGroups: FileGroup[],
+	): Promise<Map<string, ItemDetails>> {
+		const results = new Map<string, ItemDetails>();
+		const deleted: PendingDetail[] = [];
+		for (const group of itemGroups) await this.loadItemGroup(group, results, deleted);
+		for (const group of fileGroups) await this.loadFileGroup(group, results, deleted);
+		if (deleted.length && this.recycleBin) {
+			await this.recycleBin.findMany(
+				deleted
+					.filter(({ change }) => change.UniqueId)
+					.map(({ change }) => ({
+						uniqueId: String(change.UniqueId),
+						changeTime: change.Time as string | undefined,
+					})),
+			);
+		}
+		for (const { key, change } of deleted) results.set(key, await this.loadDeleted(change));
+		return results;
+	}
+
+	private async loadItemGroup(
+		group: ItemGroup,
+		results: Map<string, ItemDetails>,
+		deleted: PendingDetail[],
+	): Promise<void> {
+		const web = await this.getWeb(group.webId);
+		const ids = [...new Set(group.entries.map((entry) => entry.id))];
+		const [rows, listInfo] = await Promise.all([
+			this.expandFields.length
+				? this.readItemsInBatches(web, group.listId, ids)
+				: this.readItemsByQuery(web, group.listId, ids),
+			this.getListInfo(group.webId, group.listId),
+		]);
+		for (const entry of group.entries) {
+			const item = rows?.get(entry.id);
+			if (item) results.set(entry.key, this.toItemDetails(item, listInfo));
+			else deleted.push(entry);
+		}
+	}
+
+	/** One CAML query for each 500 IDs. Returns undefined when the list does not exist. */
+	private async readItemsByQuery(
+		web: IWeb,
+		listId: string,
+		ids: number[],
+	): Promise<Map<number, IDataObject> | undefined> {
+		const rows = new Map<number, IDataObject>();
+		const list = web.lists.getById(listId);
+		for (const part of chunk(ids, ITEM_IDS_PER_QUERY)) {
+			const query = List(list, 'getitems').select(...BASE_ITEM_SELECT, ...this.selectFields);
+			const page = (await spPost(query, body({ query: { ViewXml: buildItemIdQuery(part) } })).catch(
+				undefinedIfNotFound,
+			)) as IDataObject[] | undefined;
+			if (!page) return undefined;
+			for (const row of page) rows.set(Number(row.Id ?? row.ID), row);
+		}
+		return rows;
+	}
+
+	/**
+	 * The CAML query cannot expand lookup and person fields (for example Editor/Title). Then the items
+	 * are read by ID in $batch requests of 100.
+	 */
+	private async readItemsInBatches(
+		web: IWeb,
+		listId: string,
+		ids: number[],
+	): Promise<Map<number, IDataObject>> {
+		const results = await runInBatches(
+			web,
+			ids,
+			async (batchedWeb, id) =>
+				(await batchedWeb.lists
+					.getById(listId)
+					.items.getById(id)
+					.select(...BASE_ITEM_SELECT, ...this.selectFields)
+					.expand(...this.expandFields)()) as IDataObject,
+			REQUESTS_PER_BATCH,
+			REQUESTS_PER_BATCH,
+		);
+		const rows = new Map<number, IDataObject>();
+		for (const result of results) {
+			if (result.ok && result.value) rows.set(ids[result.index], result.value);
+			else if (!isNotFoundError(result.error)) throw result.error;
+		}
+		return rows;
+	}
+
+	private toItemDetails(item: IDataObject, listInfo: ListInfo | undefined): ItemDetails {
 		const isFolder = Number(item.FileSystemObjectType) === 1;
 		const isFile = !isFolder && listInfo?.baseType === DOCUMENT_LIBRARY_BASE_TYPE;
 		const details: ItemDetails = {
@@ -631,31 +879,58 @@ export class ChangeResolver {
 			isFolder,
 			isFile,
 		};
+		const fields = this.options.itemFields;
 		if (fields.length) {
 			details.fields = Object.fromEntries(
 				fields.map((field) => [field, getFieldValue(item, field)]),
 			) as IDataObject;
 		}
+		this.fieldValues.set(
+			details,
+			Object.fromEntries(
+				this.selectFields.map((field) => [field, getFieldValue(item, field)]),
+			) as IDataObject,
+		);
 		return details;
 	}
 
-	private async loadFileOrFolder(change: IDataObject, objectType: string): Promise<ItemDetails> {
-		const web = await this.getWeb(change.WebId);
-		const uniqueId = String(change.UniqueId);
-		const isFolder = objectType === 'Folder';
-		const target = isFolder ? web.getFolderById(uniqueId) : web.getFileById(uniqueId);
-		const data = (await target.select('Name', 'ServerRelativeUrl')().catch(undefinedIfNotFound)) as
-			| IDataObject
-			| undefined;
-		if (!data) return await this.loadDeleted(change);
-		return {
-			exists: true,
-			kind: isFolder ? 'folder' : 'file',
-			name: data.Name as string,
-			serverRelativeUrl: data.ServerRelativeUrl as string,
-			isFolder,
-			isFile: !isFolder,
-		};
+	/** Files and folders by UniqueId, in $batch requests of 100. */
+	private async loadFileGroup(
+		group: FileGroup,
+		results: Map<string, ItemDetails>,
+		deleted: PendingDetail[],
+	): Promise<void> {
+		const web = await this.getWeb(group.webId);
+		const reads = await runInBatches(
+			web,
+			group.entries,
+			async (batchedWeb, { change, isFolder }) => {
+				const uniqueId = String(change.UniqueId);
+				const target = isFolder
+					? batchedWeb.getFolderById(uniqueId)
+					: batchedWeb.getFileById(uniqueId);
+				return (await target.select('Name', 'ServerRelativeUrl')()) as IDataObject;
+			},
+			REQUESTS_PER_BATCH,
+			REQUESTS_PER_BATCH,
+		);
+		for (const read of reads) {
+			const entry = group.entries[read.index];
+			if (read.ok && read.value) {
+				results.set(entry.key, {
+					exists: true,
+					kind: entry.isFolder ? 'folder' : 'file',
+					name: read.value.Name as string,
+					serverRelativeUrl: read.value.ServerRelativeUrl as string,
+					isFolder: entry.isFolder,
+					isFile: !entry.isFolder,
+				});
+			} else if (isNotFoundError(read.error)) {
+				deleted.push(entry);
+			} else {
+				throw read.error;
+			}
+		}
 	}
 
 	/** Changes do not carry a name or path. The recycle bin keeps the UniqueId of a deleted item. */
@@ -699,6 +974,8 @@ export interface ChangeTarget {
 	getChanges(query: ChangeQuery): Promise<IDataObject[]>;
 	getCurrentToken(): Promise<string>;
 	getId(): Promise<string>;
+	/** The server-relative URL of the scope root: the folder, the list root folder, the site. */
+	getRootPath?(): Promise<string>;
 }
 
 export interface LocatorValue {
@@ -742,6 +1019,7 @@ export function getChangeTarget(
 					)) as IDataObject[],
 				getCurrentToken: async () => await getCurrentToken(target),
 				getId,
+				getRootPath: async () => folderPath,
 			};
 		}
 		return {
@@ -749,6 +1027,8 @@ export function getChangeTarget(
 			getChanges: async (query) => (await target.getChanges(query)) as IDataObject[],
 			getCurrentToken: async () => await getCurrentToken(target),
 			getId,
+			getRootPath: async () =>
+				String((await target.rootFolder.select('ServerRelativeUrl')()).ServerRelativeUrl),
 		};
 	}
 	const target = scope === 'siteCollection' ? sp.site : sp.web;
@@ -757,6 +1037,11 @@ export function getChangeTarget(
 		getChanges: async (query) => (await target.getChanges(query)) as IDataObject[],
 		getCurrentToken: async () => await getCurrentToken(target),
 		getId: async () => String(((await target.select('Id')()) as { Id: string }).Id),
+		getRootPath: async () =>
+			String(
+				((await target.select('ServerRelativeUrl')()) as { ServerRelativeUrl: string })
+					.ServerRelativeUrl,
+			),
 	};
 }
 
@@ -770,6 +1055,7 @@ export interface ChangeRunOptions extends ChangeOutputOptions {
 	/** Stop reading more pages after this time (Date.now() value). */
 	deadline?: number;
 	recycleBinSource?: RecycleBinSource;
+	editorSource?: EditorSource;
 }
 
 export interface ChangeRunResult {
@@ -806,26 +1092,37 @@ export function classifyChange(
 	objectType: string,
 	details: ItemDetails | undefined,
 	listBaseType?: number,
+	fileSystemObjectType?: unknown,
 ): ChangeKind {
 	if (details?.kind) return details.kind;
 	if (objectType === 'File') return 'file';
 	if (objectType === 'Folder') return 'folder';
 	if (objectType === 'Item') {
+		if (fileSystemObjectType !== undefined && Number(fileSystemObjectType) === 1) return 'folder';
 		return listBaseType === DOCUMENT_LIBRARY_BASE_TYPE ? 'file' : 'item';
 	}
 	return 'other';
 }
 
-function parseFields(value: string | undefined): string[] {
-	return (value ?? '')
-		.split(',')
-		.map((field) => field.trim())
-		.filter(Boolean);
+function parseFields(value: string | string[] | undefined): string[] {
+	const parts = Array.isArray(value) ? value : (value ?? '').split(',');
+	return [...new Set(parts.map((field) => String(field).trim()).filter(Boolean))];
+}
+
+function hasValue(value: unknown): boolean {
+	return value !== undefined && value !== null && value !== '';
+}
+
+function isContentChange(objectType: string): boolean {
+	return objectType === 'Item' || objectType === 'File' || objectType === 'Folder';
 }
 
 /**
- * Reads changes page by page and applies the folder path and event filters. The next change token
- * is the token of the last change that was read, also when a filter skipped that change.
+ * Reads changes page by page and applies the filters. The next change token is the token of the
+ * last change that was read, also when a filter skipped that change.
+ *
+ * For each page it loads the item details of all changes that need them in bulk (see
+ * ChangeResolver.prefetch), so a page of 1000 changes in one list needs about two requests.
  */
 export async function runChangeQuery(
 	sp: SPFI,
@@ -835,14 +1132,45 @@ export async function runChangeQuery(
 ): Promise<ChangeRunResult> {
 	const folderFilter = options.folderPathFilter?.trim() || target.folderPath;
 	const events = options.events?.length ? options.events : undefined;
-	const needDetails = !!options.includeItemDetails || !!folderFilter || !!events;
-	const resolver = needDetails
-		? new ChangeResolver(sp, {
-				itemFields: parseFields(options.itemFields),
-				resolveDeletedItems: !!options.resolveDeletedItems,
-				recycleBinSource: options.recycleBinSource,
-			})
-		: undefined;
+	const itemKinds = parseItemKinds(options.itemKinds);
+	const maxDepth = parseMaxDepth(options.maxDepth);
+	const excludedEditors = parseEditorList(options.excludeEditors);
+	const fieldFilters = parseFieldFilters(options.fieldFilters);
+	const itemFields = parseFields(options.itemFields);
+
+	// These options need the item details of every change.
+	const detailsForAll =
+		!!options.includeItemDetails || !!folderFilter || !!events || fieldFilters.length > 0;
+	// Item Kind and Max Depth only need the details when the change has no kind or path.
+	const needsDetails = (change: IDataObject, objectType: string): boolean =>
+		detailsForAll ||
+		(itemKinds.length > 0 && objectType === 'Item' && !hasValue(change.FileSystemObjectType)) ||
+		(maxDepth !== undefined && isContentChange(objectType) && !hasValue(change.ServerRelativeUrl));
+	// Without filters that need details, only the changes up to the limit need details.
+	const onlyLimitNeedsDetails =
+		!folderFilter && !events && !fieldFilters.length && !itemKinds.length && maxDepth === undefined;
+
+	const resolver =
+		detailsForAll || itemKinds.length || maxDepth !== undefined
+			? new ChangeResolver(sp, {
+					itemFields,
+					extraFields: fieldFilters.map((filter) => filter.field),
+					resolveDeletedItems: !!options.resolveDeletedItems,
+					recycleBinSource: options.recycleBinSource,
+				})
+			: undefined;
+	const editors =
+		excludedEditors.length || options.includeItemDetails
+			? new EditorDirectory(options.editorSource ?? createEditorSource(sp))
+			: undefined;
+	let depthRoot: Promise<string | undefined> | undefined;
+	const getDepthRoot = async () => {
+		depthRoot ??= folderFilter
+			? Promise.resolve(folderFilter)
+			: (target.getRootPath?.() ?? Promise.resolve(undefined));
+		return await depthRoot;
+	};
+
 	const limit = options.returnAll ? Infinity : Math.max(1, options.limit ?? 50);
 	const changes: IDataObject[] = [];
 	let nextChangeToken: string | undefined;
@@ -854,36 +1182,74 @@ export async function runChangeQuery(
 		hasMore = batch.length > 0;
 		if (!batch.length) break;
 
+		const excluded = new Set<IDataObject>();
 		for (const change of batch) {
-			const objectType = getObjectType(change);
-			const details = resolver ? await resolver.getDetails(change, objectType) : undefined;
+			if (await isEditorExcluded(change, excludedEditors, editors)) excluded.add(change);
+		}
+		if (resolver) {
+			let requests = batch
+				.filter((change) => !excluded.has(change))
+				.map((change) => ({ change, objectType: getObjectType(change) }))
+				.filter(({ change, objectType }) => needsDetails(change, objectType));
+			if (onlyLimitNeedsDetails) requests = requests.slice(0, limit - changes.length);
+			await resolver.prefetch(requests);
+		}
 
-			let keep = true;
+		for (const change of batch) {
+			nextChangeToken = getChangeTokenString(change) ?? nextChangeToken;
+			if (excluded.has(change)) continue;
+
+			const objectType = getObjectType(change);
+			const details =
+				resolver && needsDetails(change, objectType)
+					? await resolver.getDetails(change, objectType)
+					: undefined;
+
 			if (folderFilter) {
 				const path = details?.serverRelativeUrl;
 				// The folder change log only has changes inside the folder, so an unknown path is kept.
-				keep =
+				const inside =
 					path || !target.folderPath
 						? isUnderFolder(path, folderFilter, query.RecursiveAll !== false)
 						: true;
+				if (!inside) continue;
 			}
-			let matchedEvents: string[] | undefined;
-			if (keep && events) {
+
+			let kind: ChangeKind | undefined;
+			if (events || itemKinds.length) {
 				const listInfo =
 					objectType === 'Item' && !details?.kind && resolver
 						? await resolver.getListInfo(change.WebId, change.ListId)
 						: undefined;
-				const kind = classifyChange(objectType, details, listInfo?.baseType);
-				matchedEvents = getMatchingEvents(Number(change.ChangeType), kind, events);
-				keep = matchedEvents.length > 0;
+				kind = classifyChange(objectType, details, listInfo?.baseType, change.FileSystemObjectType);
+			}
+			if (itemKinds.length && !itemKinds.includes(kind as ItemKind)) continue;
+
+			if (maxDepth !== undefined) {
+				const path = details?.serverRelativeUrl ?? (change.ServerRelativeUrl as string | undefined);
+				if (path && !isWithinDepth(path, await getDepthRoot(), maxDepth)) continue;
 			}
 
-			nextChangeToken = getChangeTokenString(change) ?? nextChangeToken;
-			if (!keep) continue;
+			if (
+				fieldFilters.length &&
+				!matchesFieldFilters(resolver?.getFieldValues(details), fieldFilters)
+			) {
+				continue;
+			}
+
+			let matchedEvents: string[] | undefined;
+			if (events) {
+				matchedEvents = getMatchingEvents(Number(change.ChangeType), kind ?? 'other', events);
+				if (!matchedEvents.length) continue;
+			}
 
 			const output = formatChange(change);
 			if (matchedEvents) output.events = matchedEvents;
 			if (details && (options.includeItemDetails || folderFilter)) output.item = details;
+			if (options.includeItemDetails) {
+				const editorEmail = await getEditorEmail(change, editors);
+				if (editorEmail) output.editorEmail = editorEmail;
+			}
 			changes.push(output);
 			if (changes.length >= limit) break;
 		}
@@ -1196,31 +1562,33 @@ function sortByDisplayName(properties: INodeProperties[]): INodeProperties[] {
 }
 
 const itemDetailOptions: INodeProperties[] = [
-	{
+	pathRLC({
 		displayName: 'Folder Path Filter',
 		name: 'folderPathFilter',
-		type: 'string',
-		default: '',
-		placeholder: 'Shared Documents/Folder',
+		required: false,
+		default: { mode: 'path', value: '' },
 		description:
 			'Only keep changes to files, folders and items inside this folder. With the List scope, SharePoint reads the change log of the folder. With other scopes, the node reads the item details of each change to find its path.',
-	},
+	}),
 	{
 		displayName: 'Include Item Details',
 		name: 'includeItemDetails',
 		type: 'boolean',
 		default: false,
 		description:
-			'Whether to read the name, server-relative URL and type of each changed file, folder or item',
+			'Whether to read the name, server-relative URL and type of each changed file, folder or item, and the editor email when it is known. The node reads the details in bulk: about one request for each 500 changed items in a list.',
 	},
 	{
-		displayName: 'Item Fields',
+		displayName: 'Item Field Names or IDs',
 		name: 'itemFields',
-		type: 'string',
-		default: '',
-		placeholder: 'Title,Modified,Editor/Title',
+		type: 'multiOptions',
+		typeOptions: {
+			loadOptionsMethod: 'getChangeItemFieldOptions',
+			loadOptionsDependsOn: ['list.value'],
+		},
+		default: [],
 		description:
-			'Comma-separated internal names of item fields to include in the item details. Only used for list items.',
+			'Fields to include in the item details. Only used for list items. The list shows the fields of the selected list, so it needs the List scope. An expression can return an array or a comma-separated list, for example "Title,Editor/Title". Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 	},
 	{
 		displayName: 'Resolve Deleted Items From Recycle Bin',
@@ -1232,6 +1600,92 @@ const itemDetailOptions: INodeProperties[] = [
 	},
 ];
 
+const itemKindOption: INodeProperties = {
+	displayName: 'Item Kind',
+	name: 'changeItemKinds',
+	type: 'multiOptions',
+	options: [
+		{ name: 'Files', value: 'file' },
+		{ name: 'Folders', value: 'folder' },
+		{ name: 'List Items', value: 'item', description: 'Items that are not files or folders' },
+	],
+	default: [],
+	description:
+		'Only keep changes to these kinds of objects. Changes to lists, sites and other objects are removed. The node uses the item details, or the FileSystemObjectType of the change when it has one.',
+};
+
+const changeFilterOptions: INodeProperties[] = [
+	{
+		displayName: 'Exclude Editors',
+		name: 'excludeEditors',
+		type: 'string',
+		default: '',
+		placeholder: 'e.g. SharePoint App, a@contoso.com',
+		description:
+			'A comma-separated list of editors to ignore. An entry matches the display name of the editor, the editor email hint of the change, or the email or login of the site user with that display name. Not case-sensitive.',
+	},
+	{
+		displayName: 'Field Filters',
+		name: 'changeFieldFilters',
+		type: 'fixedCollection',
+		typeOptions: { multipleValues: true },
+		placeholder: 'Add Field Filter',
+		default: {},
+		description:
+			'Only keep changes to list items whose field values match all filters. The node compares the values after it reads the item details, so this option reads the details of every change. Deleted items and changes without item fields do not match.',
+		options: [
+			{
+				displayName: 'Filter',
+				name: 'filter',
+				values: [
+					{
+						displayName: 'Field Name or ID',
+						name: 'field',
+						type: 'options',
+						typeOptions: {
+							loadOptionsMethod: 'getChangeItemFieldOptions',
+							loadOptionsDependsOn: ['list.value'],
+						},
+						default: '',
+						description:
+							'The internal name of the field. The list shows the fields of the selected list (List scope). For a lookup or person field, use an expression such as "Editor/Title". Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+					},
+					{
+						displayName: 'Operator',
+						name: 'operator',
+						type: 'options',
+						options: [
+							{ name: 'Contains', value: 'contains' },
+							{ name: 'Equals', value: 'equals' },
+							{ name: 'Is Empty', value: 'isEmpty' },
+							{ name: 'Is Not Empty', value: 'isNotEmpty' },
+							{ name: 'Not Equals', value: 'notEquals' },
+						],
+						default: 'equals',
+						description: 'Text compares are not case-sensitive',
+					},
+					{
+						displayName: 'Value',
+						name: 'value',
+						type: 'string',
+						default: '',
+						displayOptions: { hide: { operator: ['isEmpty', 'isNotEmpty'] } },
+					},
+				],
+			},
+		],
+	},
+	{
+		displayName: 'Max Depth',
+		name: 'changeMaxDepth',
+		type: 'number',
+		typeOptions: { minValue: 1 },
+		default: 1,
+		description:
+			'Only keep changes up to this many folder levels below the folder path filter, or below the scope root (the library or list, or the site). 1 keeps only the direct children. Changes without a path are kept.',
+	},
+];
+
 export const changeOptionsProperty: INodeProperties = {
 	displayName: 'Options',
 	name: 'options',
@@ -1240,6 +1694,8 @@ export const changeOptionsProperty: INodeProperties = {
 	default: {},
 	options: sortByDisplayName([
 		...itemDetailOptions,
+		...changeFilterOptions,
+		itemKindOption,
 		{
 			...onExpiredTokenOption,
 			displayOptions: { show: { '/startFrom': ['token', 'date'] } },
@@ -1270,6 +1726,7 @@ export const triggerOptionsProperty: INodeProperties = {
 	options: sortByDisplayName([
 		fetchLimitOption,
 		...itemDetailOptions.filter((option) => option.name !== 'folderPathFilter'),
+		...changeFilterOptions,
 		onExpiredTokenOption,
 		{
 			displayName: 'Start From Date',
@@ -1287,11 +1744,8 @@ export function showFor(properties: INodeProperties[], show?: IDataObject): INod
 	return properties.map((property) => withDisplay(property, show));
 }
 
-export function resolveFolderFilter(
-	siteUrl: string,
-	value: string | undefined,
-): string | undefined {
-	const trimmed = value?.trim();
+export function resolveFolderFilter(siteUrl: string, value: unknown): string | undefined {
+	const trimmed = locatorValue(value);
 	return trimmed ? toServerRelativePath(siteUrl, trimmed) : undefined;
 }
 
