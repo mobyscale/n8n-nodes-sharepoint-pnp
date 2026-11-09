@@ -8,6 +8,8 @@ These nodes use the SharePoint REST API. They do not use Microsoft Graph.
 
 [n8n](https://n8n.io/) is a [fair-code licensed](https://docs.n8n.io/sustainable-use-license/) workflow automation platform.
 
+<img width="1327" height="842" alt="image" src="https://github.com/user-attachments/assets/78db8ceb-93c9-4e34-88a5-e2d3ce88d847" />
+
 ## Installation
 
 Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes/installation/) in the n8n community nodes documentation. The package name is `n8n-nodes-sharepoint-pnp`.
