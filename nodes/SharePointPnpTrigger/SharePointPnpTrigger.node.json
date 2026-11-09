@@ -5,7 +5,7 @@
 	"categories": ["Data & Storage", "Productivity"],
 	"resources": {
 		"credentialDocumentation": [
-			{ "url": "https://github.com/octanesoftware/n8n-nodes-sharepoint-pnp#credentials" }
+			{ "url": "https://github.com/octanesoftware/n8n-nodes-sharepoint-pnp/blob/main/docs/credentials.md" }
 		],
 		"primaryDocumentation": [
 			{ "url": "https://github.com/octanesoftware/n8n-nodes-sharepoint-pnp#readme" }

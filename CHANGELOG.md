@@ -4,7 +4,7 @@
 
 ### Package
 
-- OAuth2 (delegated) and certificate (app-only) credentials.
+- OAuth2 (delegated) and certificate (app-only) credentials. The OAuth2 credential has a Tenant ID option for single-tenant apps.
 - PnPjs transport that uses the n8n authentication.
 - Property selection contract for all Get and Get Many operations: documented default properties, Additional Properties, Expand and Return All Properties. Include List Item Fields still works for older workflows.
 

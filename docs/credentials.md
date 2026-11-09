@@ -11,8 +11,9 @@ The **SharePoint PnP OAuth2 API** credential signs in as a user. The node can do
 3. Add delegated permissions for SharePoint, for example `AllSites.FullControl`. Give admin consent if your tenant needs it.
 4. Create a client secret.
 5. In n8n, create the credential. Enter the client ID and the client secret.
-6. Enter the **Subdomain**. For `https://contoso.sharepoint.com`, enter `contoso`.
-7. Select **Connect** and sign in.
+6. Enter the **Tenant ID** (the directory ID of the app registration). Keep `common` only for a multi-tenant app. A single-tenant app with `common` fails with the Entra error AADSTS50194.
+7. Enter the **Subdomain**. For `https://contoso.sharepoint.com`, enter `contoso`.
+8. Select **Connect** and sign in.
 
 The credential asks for the scope `https://<subdomain>.sharepoint.com/.default`. The permissions of the app registration decide what the token can do.
 
