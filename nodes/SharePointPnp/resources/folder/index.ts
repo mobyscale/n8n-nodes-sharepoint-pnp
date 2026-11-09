@@ -7,15 +7,22 @@ import { applySelection, selectionOptions, type SelectionValues } from '../../sh
 import { copyJobProperties, methodProperty, runMoveCopyJob } from '../../shared/copyJob';
 import {
 	buildMoveCopyOptions,
-	getAncestorPaths,
+	ensureFolder,
 	getDestinationPath,
-	getMissingSegments,
 	undefinedIfNotFound,
 	withListItemFields,
 	type MoveCopyFields,
 } from '../../shared/filesFolders';
 import { joinPath, splitPath } from '../../shared/utils';
 import type { OperationContext, ResourceModule } from '../types';
+import {
+	copyChildrenIfMissingOperation,
+	ensureFoldersOperation,
+	ensurePathOperation,
+	inheritMetadataFromParentOperation,
+	setMetadataRecursiveOperation,
+} from './provision';
+import { provisionProperties } from './provisionDescription';
 
 const show = (operation: string[]) => ({ show: { resource: ['folder'], operation } });
 
@@ -38,7 +45,7 @@ const includeFieldsOption: INodeProperties = {
 	type: 'boolean',
 	default: false,
 	description:
-		'Whether to add the list item fields of the folder. Same as adding ListItemAllFields to Expand. Kept for older workflows.',
+		'Whether to add the list item fields of the folder in ListItemAllFields. The default properties do not change.',
 };
 
 function moveCopyOptions(kind: 'move' | 'copy'): INodeProperties {
@@ -108,6 +115,13 @@ const description: INodeProperties[] = [
 		options: [
 			{ name: 'Copy', value: 'copy', description: 'Copy a folder', action: 'Copy a folder' },
 			{
+				name: 'Copy Children If Missing',
+				value: 'copyChildrenIfMissing',
+				description:
+					'Copy the files and subfolders of the folder (for example a template) into a destination folder when they are not there',
+				action: 'Copy children of a folder if missing',
+			},
+			{
 				name: 'Create',
 				value: 'create',
 				description: 'Create a folder and all missing parent folders',
@@ -120,10 +134,30 @@ const description: INodeProperties[] = [
 				action: 'Delete a folder',
 			},
 			{
+				name: 'Ensure Folders',
+				value: 'ensureFolders',
+				description:
+					'Create a small tree of folders below the folder in one step, and set their fields',
+				action: 'Ensure a folder tree',
+			},
+			{
+				name: 'Ensure Path',
+				value: 'ensurePath',
+				description: 'Create the missing folders of a path below the folder, and set their fields',
+				action: 'Ensure a folder path',
+			},
+			{
 				name: 'Get',
 				value: 'get',
 				description: 'Get the properties of a folder',
 				action: 'Get a folder',
+			},
+			{
+				name: 'Inherit Metadata From Parent',
+				value: 'inheritMetadataFromParent',
+				description:
+					'Copy field values from the parent folder to the folder and to all files and folders below it',
+				action: 'Inherit metadata from the parent folder',
 			},
 			{ name: 'Move', value: 'move', description: 'Move a folder', action: 'Move a folder' },
 			{
@@ -131,6 +165,12 @@ const description: INodeProperties[] = [
 				value: 'rename',
 				description: 'Rename a folder',
 				action: 'Rename a folder',
+			},
+			{
+				name: 'Set Metadata Recursive',
+				value: 'setMetadataRecursive',
+				description: 'Set field values on all files and folders below the folder',
+				action: 'Set metadata on a folder tree',
 			},
 		],
 		default: 'create',
@@ -196,15 +236,11 @@ const description: INodeProperties[] = [
 			},
 		],
 	},
+	...provisionProperties,
 ];
 
 function getFolder(sp: SPFI, path: string) {
 	return sp.web.getFolderByServerRelativePath(path);
-}
-
-async function folderExists(sp: SPFI, path: string): Promise<boolean> {
-	const folder = await undefinedIfNotFound(getFolder(sp, path).select('Exists')());
-	return folder?.Exists ?? false;
 }
 
 async function readFolder(
@@ -226,26 +262,8 @@ async function readResult(sp: SPFI, path: string, base: IDataObject): Promise<ID
 
 async function create(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
 	const path = getPath.call(this, siteUrl, itemIndex, 'folderPath');
-	if (await folderExists(sp, path)) return { ...(await readFolder(sp, path)), created: false };
-
-	let existingAncestor: string | undefined;
-	for (const candidate of getAncestorPaths(path, siteUrl).slice(1)) {
-		if (await folderExists(sp, candidate)) {
-			existingAncestor = candidate;
-			break;
-		}
-	}
-	if (!existingAncestor) {
-		throw new NodeOperationError(
-			this.getNode(),
-			`No parent of "${path}" exists. The first folder level must be a library that exists.`,
-			{ itemIndex },
-		);
-	}
-	for (const missing of getMissingSegments(path, existingAncestor)) {
-		await sp.web.folders.addUsingPath(missing, false);
-	}
-	return { ...(await readFolder(sp, path)), created: true };
+	const created = await ensureFolder(sp, siteUrl, path);
+	return { ...(await readFolder(sp, path)), created };
 }
 
 async function get(this: IExecuteFunctions, { sp, siteUrl, itemIndex }: OperationContext) {
@@ -333,5 +351,10 @@ export const folderResource: ResourceModule = {
 		move: moveCopy('move'),
 		rename,
 		delete: remove,
+		ensureFolders: ensureFoldersOperation,
+		ensurePath: ensurePathOperation,
+		inheritMetadataFromParent: inheritMetadataFromParentOperation,
+		copyChildrenIfMissing: copyChildrenIfMissingOperation,
+		setMetadataRecursive: setMetadataRecursiveOperation,
 	},
 };
