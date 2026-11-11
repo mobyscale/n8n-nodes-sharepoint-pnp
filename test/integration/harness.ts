@@ -51,7 +51,7 @@ export const itWrite = config?.runWriteTests ? it : it.skip;
 const node: INode = {
 	id: 'integration',
 	name: 'SharePoint PnP',
-	type: 'n8n-nodes-sharepoint-pnp.sharePointPnp',
+	type: '@mobyscale/n8n-nodes-sharepoint-pnp.sharePointPnp',
 	typeVersion: 1,
 	position: [0, 0],
 	parameters: {},

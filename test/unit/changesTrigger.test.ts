@@ -24,7 +24,7 @@ const LIST_ID = '11111111-2222-3333-4444-555555555555';
 const node: INode = {
 	id: 'trigger',
 	name: 'SharePoint PnP Trigger',
-	type: 'n8n-nodes-sharepoint-pnp.sharePointPnpTrigger',
+	type: '@mobyscale/n8n-nodes-sharepoint-pnp.sharePointPnpTrigger',
 	typeVersion: 1,
 	position: [0, 0],
 	parameters: {},

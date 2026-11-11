@@ -34,7 +34,7 @@ function evaluateOutputs(parameters: IDataObject) {
 	const node: INode = {
 		id: 'test',
 		name: 'SharePoint PnP',
-		type: 'n8n-nodes-sharepoint-pnp.sharePointPnp',
+		type: '@mobyscale/n8n-nodes-sharepoint-pnp.sharePointPnp',
 		typeVersion: 1,
 		position: [0, 0],
 		parameters: parameters as INode['parameters'],

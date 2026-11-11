@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`n8n-nodes-sharepoint-pnp` is an n8n community node package for SharePoint Online. It wraps PnPjs (`@pnp/sp`, the
+`@mobyscale/n8n-nodes-sharepoint-pnp` is an n8n community node package for SharePoint Online. It wraps PnPjs (`@pnp/sp`, the
 SharePoint REST API, not Microsoft Graph). It is a public npm package that is meant for n8n Cloud verification, so
 it follows the strict n8n community node rules (`"strict": true` in `package.json`).
 

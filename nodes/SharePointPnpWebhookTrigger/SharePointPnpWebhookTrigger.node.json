@@ -1,14 +1,14 @@
 {
-	"node": "n8n-nodes-sharepoint-pnp.sharePointPnpWebhookTrigger",
+	"node": "@mobyscale/n8n-nodes-sharepoint-pnp.sharePointPnpWebhookTrigger",
 	"nodeVersion": "1.0",
 	"codexVersion": "1.0",
 	"categories": ["Data & Storage", "Productivity"],
 	"resources": {
 		"credentialDocumentation": [
-			{ "url": "https://github.com/octanesoftware/n8n-nodes-sharepoint-pnp/blob/main/docs/credentials.md" }
+			{ "url": "https://github.com/mobyscale/n8n-nodes-sharepoint-pnp/blob/main/docs/credentials.md" }
 		],
 		"primaryDocumentation": [
-			{ "url": "https://github.com/octanesoftware/n8n-nodes-sharepoint-pnp#readme" }
+			{ "url": "https://github.com/mobyscale/n8n-nodes-sharepoint-pnp#readme" }
 		]
 	}
 }

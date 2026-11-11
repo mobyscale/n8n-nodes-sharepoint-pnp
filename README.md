@@ -1,4 +1,4 @@
-# n8n-nodes-sharepoint-pnp
+# @mobyscale/n8n-nodes-sharepoint-pnp
 
 n8n community nodes for SharePoint Online. The nodes wrap [PnPjs](https://pnp.github.io/pnpjs/) (`@pnp/sp`). PnPjs is the community library for the SharePoint REST API. See the [PnPjs repository](https://github.com/pnp/pnpjs) for the source.
 
@@ -12,7 +12,7 @@ These nodes use the SharePoint REST API. They do not use Microsoft Graph.
 
 ## Installation
 
-Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes/installation/) in the n8n community nodes documentation. The package name is `n8n-nodes-sharepoint-pnp`.
+Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes/installation/) in the n8n community nodes documentation. The package name is `@mobyscale/n8n-nodes-sharepoint-pnp`.
 
 PnPjs is bundled into the nodes when the package is built. The package has no runtime dependencies.
 

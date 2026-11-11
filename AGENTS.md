@@ -101,7 +101,7 @@ regarding building community nodes:
 - https://docs.n8n.io/integrations/creating-nodes/build/reference/
 - https://docs.n8n.io/integrations/creating-nodes/build/reference/ux-guidelines/
 
-## This project: n8n-nodes-sharepoint-pnp
+## This project: @mobyscale/n8n-nodes-sharepoint-pnp
 
 The project rules, commands and architecture are in `CLAUDE.md`. Read it before you change code. It applies to
 all agents, not only Claude Code.

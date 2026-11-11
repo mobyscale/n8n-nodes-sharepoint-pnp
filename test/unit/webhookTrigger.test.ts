@@ -36,7 +36,7 @@ const URL_OTHER = 'https://other.example.com/hook';
 const node: INode = {
 	id: 'node-1',
 	name: 'SharePoint PnP Webhook Trigger',
-	type: 'n8n-nodes-sharepoint-pnp.sharePointPnpWebhookTrigger',
+	type: '@mobyscale/n8n-nodes-sharepoint-pnp.sharePointPnpWebhookTrigger',
 	typeVersion: 1,
 	position: [0, 0],
 	parameters: {},

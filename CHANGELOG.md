@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 (2026-11-11)
+
+First release, published to npm as `@mobyscale/n8n-nodes-sharepoint-pnp`.
 
 ### Package
 
@@ -79,7 +81,7 @@
 - Pickers for users, principals (groups and users), roles and list items. Group, User and Site owner fields use the same pickers.
 - Set and Add options: Clear Subscopes, Always Break Inheritance (Set) and Skip Unresolved Principals, with a `warnings` array in the output.
 - Add, Remove and Set have an Input Mode (Fields or JSON). In JSON mode, Role Assignments (JSON) takes many principals and roles in one array.
-- Apply Mapping: apply a map of paths, principals and roles to the folders below a base folder. `*` path segments match existing child folders without case. All principals and roles resolve one time before any change. Modes Add and Set (default). Options: Break Inheritance (Always or Only If Inheriting), Copy Current Assignments First, Clear Subscopes, Create Missing Folders, If Folder Is Missing (Skip or Fail), Skip Unresolved Principals, and One Item Per Folder output. The output has `folders`, `warnings` and `missing`.
+- Apply Mapping: apply a map of paths, principals and roles to the folders below a base folder. A `*` path segment matches all child folders and a `**` segment matches folders at any depth, without case. All principals and roles resolve one time before any change. Modes Add and Set (default). Options: Break Inheritance (Always or Only If Inheriting), Copy Current Assignments First, Clear Subscopes, Create Missing Folders, If Folder Is Missing (Skip or Fail), Skip Unresolved Principals, and One Item Per Folder output. The output has `folders`, `warnings` and `missing`.
 - Set sends more than 100 role assignment changes in more than one `$batch` request.
 
 #### Sharing
