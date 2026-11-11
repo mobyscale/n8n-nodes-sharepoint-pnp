@@ -1,5 +1,7 @@
 # @mobyscale/n8n-nodes-sharepoint-pnp
 
+[![npm](https://img.shields.io/npm/v/@mobyscale/n8n-nodes-sharepoint-pnp)](https://www.npmjs.com/package/@mobyscale/n8n-nodes-sharepoint-pnp)
+
 n8n community nodes for SharePoint Online. The nodes wrap [PnPjs](https://pnp.github.io/pnpjs/) (`@pnp/sp`). PnPjs is the community library for the SharePoint REST API. See the [PnPjs repository](https://github.com/pnp/pnpjs) for the source.
 
 Use these nodes for operations that the built-in Microsoft SharePoint node does not have. Examples are permissions, sharing links, the change log, search, the recycle bin, managed metadata, and folder copy and move with the SharePoint copy job.
