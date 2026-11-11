@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.0 (2026-11-11)
+## 1.0.0 (2026-11-11)
 
-First release, published to npm as `@mobyscale/n8n-nodes-sharepoint-pnp`.
+First stable release, published to npm as `@mobyscale/n8n-nodes-sharepoint-pnp`. Version 0.1.0 has the same content.
 
 ### Package
 
